@@ -1,4 +1,6 @@
 from typing import Any, Dict, List, Optional
+from core.authorization.errors import AuthorizationDeniedError
+from core.authorization.policy import AuthorizationPolicy
 from core.interfaces.tool import Tool
 
 
@@ -17,12 +19,28 @@ class ToolRegistry:
     Registry for managing and executing tools.
 
     Provides registration, lookup, listing, and execution of tools.
-    Designed to allow future authorization and observability layers
-    to wrap around tool execution cleanly.
+    Supports evaluating an AuthorizationPolicy prior to tool execution.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, authorization_policy: Optional[AuthorizationPolicy] = None) -> None:
+        """
+        Initialize the ToolRegistry.
+
+        Args:
+            authorization_policy: Optional default authorization policy applied to executions.
+        """
         self._tools: Dict[str, Tool] = {}
+        self._authorization_policy = authorization_policy
+
+    @property
+    def authorization_policy(self) -> Optional[AuthorizationPolicy]:
+        """Return the default authorization policy for the registry."""
+        return self._authorization_policy
+
+    @authorization_policy.setter
+    def authorization_policy(self, policy: Optional[AuthorizationPolicy]) -> None:
+        """Set the default authorization policy for the registry."""
+        self._authorization_policy = policy
 
     def register(self, tool: Tool) -> None:
         """
@@ -80,13 +98,23 @@ class ToolRegistry:
         """
         return [tool.get_metadata() for tool in self._tools.values()]
 
-    def execute(self, name: str, args: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Any:
+    def execute(
+        self,
+        name: str,
+        args: Optional[Dict[str, Any]] = None,
+        authorization_policy: Optional[AuthorizationPolicy] = None,
+        context: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> Any:
         """
-        Execute a registered tool by name with structured arguments.
+        Execute a registered tool by name with structured arguments and authorization.
 
         Args:
             name: The name of the tool to execute.
             args: Optional structured dictionary of input arguments.
+            authorization_policy: Optional policy to evaluate before execution.
+                Overrides any default policy set on the registry.
+            context: Optional contextual information passed to the authorization policy.
             **kwargs: Additional keyword arguments forwarded to the tool.
 
         Returns:
@@ -94,7 +122,25 @@ class ToolRegistry:
 
         Raises:
             ToolNotFoundError: If the tool is not registered.
+            AuthorizationDeniedError: If the execution is denied by the authorization policy.
         """
+        # 1. Resolve tool (raises ToolNotFoundError if not registered)
         tool = self.get(name)
-        # Future authorization and observability hooks can wrap tool execution here.
+
+        # 2. Determine applicable authorization policy
+        policy = authorization_policy if authorization_policy is not None else self._authorization_policy
+
+        # 3. Check authorization before executing
+        if policy is not None:
+            call_args: Dict[str, Any] = {}
+            if args is not None and isinstance(args, dict):
+                call_args.update(args)
+            call_args.update(kwargs)
+            eval_args = call_args if (call_args or args is None) else args
+
+            decision = policy.evaluate(tool_name=name, arguments=eval_args, context=context)
+            if not decision.allowed:
+                raise AuthorizationDeniedError(tool_name=name, reason=decision.reason)
+
+        # 4. Execute tool only after authorization succeeds
         return tool.execute(args, **kwargs)
