@@ -22,6 +22,17 @@ from tools.file_tool import (
     FileToolError,
     SandboxViolationError,
 )
+from tools.http_tool import (
+    HTTPExecutionError,
+    HTTPTool,
+    HTTPToolError,
+    InvalidMethodError,
+    InvalidPathError,
+    NetworkSafetyViolationError,
+    PayloadSizeLimitExceededError,
+    ResponseSizeLimitExceededError,
+)
+from tools.mock_api_server import MockAPIServer
 
 __all__ = [
     "Calculator",
@@ -42,4 +53,13 @@ __all__ = [
     "QueryLengthLimitExceededError",
     "ParameterLimitExceededError",
     "ResultLimitExceededError",
+    "HTTPTool",
+    "HTTPToolError",
+    "NetworkSafetyViolationError",
+    "InvalidMethodError",
+    "InvalidPathError",
+    "HTTPExecutionError",
+    "PayloadSizeLimitExceededError",
+    "ResponseSizeLimitExceededError",
+    "MockAPIServer",
 ]
