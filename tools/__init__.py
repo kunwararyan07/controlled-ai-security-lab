@@ -6,6 +6,16 @@ from tools.calculator import (
     InvalidArgumentError,
     InvalidOperationError,
 )
+from tools.database_tool import (
+    DatabaseExecutionError,
+    DatabaseTool,
+    DatabaseToolError,
+    ParameterLimitExceededError,
+    QueryLengthLimitExceededError,
+    ResourceLimitExceededError,
+    ResultLimitExceededError,
+    SQLSafetyViolationError,
+)
 from tools.file_tool import (
     FileSizeLimitExceededError,
     FileTool,
@@ -24,4 +34,12 @@ __all__ = [
     "FileToolError",
     "SandboxViolationError",
     "FileSizeLimitExceededError",
+    "DatabaseTool",
+    "DatabaseToolError",
+    "SQLSafetyViolationError",
+    "DatabaseExecutionError",
+    "ResourceLimitExceededError",
+    "QueryLengthLimitExceededError",
+    "ParameterLimitExceededError",
+    "ResultLimitExceededError",
 ]
