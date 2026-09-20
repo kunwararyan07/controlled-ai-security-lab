@@ -6,6 +6,12 @@ from tools.calculator import (
     InvalidArgumentError,
     InvalidOperationError,
 )
+from tools.file_tool import (
+    FileSizeLimitExceededError,
+    FileTool,
+    FileToolError,
+    SandboxViolationError,
+)
 
 __all__ = [
     "Calculator",
@@ -14,4 +20,8 @@ __all__ = [
     "DivisionByZeroError",
     "InvalidArgumentError",
     "InvalidOperationError",
+    "FileTool",
+    "FileToolError",
+    "SandboxViolationError",
+    "FileSizeLimitExceededError",
 ]
