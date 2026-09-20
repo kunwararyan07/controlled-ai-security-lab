@@ -32,6 +32,17 @@ from tools.http_tool import (
     PayloadSizeLimitExceededError,
     ResponseSizeLimitExceededError,
 )
+from tools.command_tool import (
+    CommandExecutionError,
+    CommandNotAllowedError,
+    CommandResourceLimitError,
+    CommandTimeoutError,
+    CommandTool,
+    CommandToolError,
+    InvalidCommandArgumentError,
+    InvalidCommandError,
+    WorkspaceBoundaryError,
+)
 from tools.mock_api_server import MockAPIServer
 from tools.notification_tool import (
     InvalidNotificationArgumentError,
@@ -76,4 +87,13 @@ __all__ = [
     "InvalidRecipientError",
     "NotificationNotFoundError",
     "NotificationResourceLimitError",
+    "CommandTool",
+    "CommandToolError",
+    "InvalidCommandError",
+    "CommandNotAllowedError",
+    "InvalidCommandArgumentError",
+    "CommandResourceLimitError",
+    "CommandExecutionError",
+    "CommandTimeoutError",
+    "WorkspaceBoundaryError",
 ]
