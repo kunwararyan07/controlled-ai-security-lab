@@ -4,6 +4,7 @@ import unittest
 from agents.tool_agent import AgentResult, ToolUsingAgent
 from core.authorization import AllowlistAuthorizationPolicy
 from core.interfaces.tool_registry import ToolRegistry
+from core.logging import EventCollector
 from core.models import MockModel, ToolCall
 from tools.calculator import CalculatorTool
 
@@ -37,6 +38,7 @@ class TestToolUsingAgent(unittest.TestCase):
         self.assertFalse(result.tool_executed)
         self.assertFalse(result.authorization_denied)
         self.assertIsNone(result.error)
+        self.assertIsNotNone(result.session_id)
 
     def test_agent_final_response_plain_text(self):
         model = MockModel(response="Plain text response from model.")
@@ -71,6 +73,7 @@ class TestToolUsingAgent(unittest.TestCase):
         self.assertEqual(result.tool_call.arguments, {"operation": "add", "a": 10, "b": 5})
         self.assertTrue(result.tool_executed)
         self.assertEqual(result.tool_result, 15)
+        self.assertTrue(result.authorization_allowed)
         self.assertFalse(result.authorization_denied)
         self.assertIsNone(result.error)
 
@@ -94,6 +97,7 @@ class TestToolUsingAgent(unittest.TestCase):
         self.assertTrue(result.tool_requested)
         self.assertFalse(result.tool_executed)
         self.assertIsNone(result.tool_result)
+        self.assertFalse(result.authorization_allowed)
         self.assertTrue(result.authorization_denied)
         self.assertIsNotNone(result.authorization_reason)
         self.assertIn("not in the allowed tools list", result.authorization_reason)
@@ -133,6 +137,8 @@ class TestToolUsingAgent(unittest.TestCase):
         result = agent.send_message("Divide 10 by 0")
 
         self.assertTrue(result.tool_requested)
+        self.assertTrue(result.authorization_allowed)
+        self.assertFalse(result.authorization_denied)
         self.assertFalse(result.tool_executed)
         self.assertIsNone(result.tool_result)
         self.assertIsNotNone(result.error)
@@ -162,17 +168,82 @@ class TestToolUsingAgent(unittest.TestCase):
     def test_agent_result_to_dict(self):
         tc = ToolCall(tool_name="calc", arguments={"a": 1})
         result = AgentResult(
+            session_id="sess_123",
             final_response="Done",
             tool_call=tc,
             tool_executed=True,
             tool_result=42,
         )
         data = result.to_dict()
+        self.assertEqual(data["session_id"], "sess_123")
         self.assertEqual(data["final_response"], "Done")
         self.assertTrue(data["tool_requested"])
         self.assertEqual(data["tool_call"]["tool_name"], "calc")
         self.assertTrue(data["tool_executed"])
         self.assertEqual(data["tool_result"], 42)
+
+    def test_agent_observability_with_event_collector(self):
+        model_payload = json.dumps({
+            "type": "tool_call",
+            "tool": "calculator",
+            "arguments": {"operation": "multiply", "a": 3, "b": 4},
+        })
+        model = MockModel(response=model_payload)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["calculator"])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+            system_prompt_version="v1.0",
+        )
+
+        result = agent.send_message("Multiply 3 by 4", session_id="fixed_session")
+
+        self.assertEqual(result.session_id, "fixed_session")
+        self.assertEqual(result.tool_result, 12)
+
+        events = collector.get_events(session_id="fixed_session")
+        self.assertTrue(len(events) >= 5)
+
+        event_types = [e.event_type for e in events]
+        self.assertIn("user_input", event_types)
+        self.assertIn("model_response", event_types)
+        self.assertIn("tool_call", event_types)
+        self.assertIn("authorization_decision", event_types)
+        self.assertIn("tool_execution", event_types)
+        self.assertIn("final_response", event_types)
+
+        # Verify all events share the session_id and system_prompt_version
+        for event in events:
+            self.assertEqual(event.session_id, "fixed_session")
+            self.assertEqual(event.system_prompt_version, "v1.0")
+
+    def test_agent_observability_when_denied(self):
+        model_payload = json.dumps({
+            "type": "tool_call",
+            "tool": "calculator",
+            "arguments": {"operation": "add", "a": 1, "b": 1},
+        })
+        model = MockModel(response=model_payload)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=[])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+        )
+
+        result = agent.send_message("Add 1 and 1")
+
+        self.assertTrue(result.authorization_denied)
+        events = collector.get_events(session_id=result.session_id)
+        event_types = [e.event_type for e in events]
+        self.assertIn("authorization_decision", event_types)
+        self.assertIn("authorization_denied", event_types)
+        self.assertNotIn("tool_execution", event_types)
 
 
 if __name__ == "__main__":
