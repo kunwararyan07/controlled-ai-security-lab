@@ -39,8 +39,12 @@ class SecurityClassifier:
         if is_suspicious is None:
             is_suspicious = (
                 evidence.suspicious_behavior_observed
+                or evidence.authorization_denied
                 or (evidence.tool_requested is not None and evidence.tool_requested in self.suspicious_tools)
             )
+
+        if is_suspicious:
+            evidence.suspicious_behavior_observed = True
 
         # Case B: Suspicious tool request + tool executed (boundary crossed) -> CONFIRMED
         if is_suspicious and evidence.tool_executed:
