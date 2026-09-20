@@ -10,6 +10,8 @@ from core.logging.collector import EventCollector
 from core.logging.events import Event
 from core.models.base import ModelAdapter
 from core.models.tool_call import ToolCall
+from core.models.tool_schema import PromptBuilder
+
 
 
 class ToolUsingAgent:
@@ -117,9 +119,26 @@ class ToolUsingAgent:
 
         Does not use eval() or code execution.
         """
+        text = raw_response.strip()
+        if text.startswith("```"):
+            first_newline = text.find("\n")
+            if first_newline != -1:
+                text = text[first_newline + 1:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+
+        # Check for prose mixed with tool-call JSON
+        if not (text.startswith("{") and text.endswith("}")) and not (text.startswith("[") and text.endswith("]")):
+            if '"type": "tool_call"' in text or '"tool_call"' in text or '"tool":' in text:
+                raise ValueError("Prose mixed with tool-call JSON is not permitted. Response must be strictly a JSON object.")
+            return "final", raw_response
+
         try:
-            data = json.loads(raw_response)
-        except (json.JSONDecodeError, TypeError):
+            data = json.loads(text)
+        except (json.JSONDecodeError, TypeError) as e:
+            if text.startswith("{") and ("tool_call" in text or "tool" in text):
+                raise ValueError(f"Malformed tool-call JSON: {e}")
             return "final", raw_response
 
         if not isinstance(data, dict):
@@ -128,24 +147,28 @@ class ToolUsingAgent:
         resp_type = data.get("type")
         if resp_type == "tool_call":
             tool_name = data.get("tool") or data.get("tool_name")
-            if not tool_name or not isinstance(tool_name, str):
+            if not tool_name or not isinstance(tool_name, str) or not tool_name.strip():
                 raise ValueError("Tool call missing valid 'tool' or 'tool_name' field.")
             arguments = data.get("arguments", {})
             if not isinstance(arguments, dict):
                 raise ValueError("Tool call 'arguments' must be a dictionary.")
-            return "tool_call", ToolCall(tool_name=tool_name, arguments=arguments)
+            return "tool_call", ToolCall(tool_name=tool_name.strip(), arguments=arguments)
 
         if resp_type == "final":
-            return "final", str(data.get("content", ""))
+            content = data.get("response") if "response" in data else data.get("content", "")
+            return "final", str(content)
 
         if "tool" in data or "tool_name" in data:
             tool_name = data.get("tool") or data.get("tool_name")
-            if not tool_name or not isinstance(tool_name, str):
+            if not tool_name or not isinstance(tool_name, str) or not tool_name.strip():
                 raise ValueError("Tool call missing valid 'tool' field.")
             arguments = data.get("arguments", {})
             if not isinstance(arguments, dict):
                 raise ValueError("Tool call 'arguments' must be a dictionary.")
-            return "tool_call", ToolCall(tool_name=tool_name, arguments=arguments)
+            return "tool_call", ToolCall(tool_name=tool_name.strip(), arguments=arguments)
+
+        if "response" in data:
+            return "final", str(data["response"])
 
         if "content" in data:
             return "final", str(data["content"])
@@ -183,7 +206,8 @@ class ToolUsingAgent:
             user_input=user_input,
         )
 
-        current_prompt = user_input
+        prompt_builder = PromptBuilder(tool_registry=self.tool_registry)
+        current_prompt = prompt_builder.build_initial_prompt(user_input)
         executed_tool_calls: List[ToolCall] = []
         executed_tool_results: List[Any] = []
         last_tool_call: Optional[ToolCall] = None
@@ -343,7 +367,12 @@ class ToolUsingAgent:
                         final_response=str(result),
                     )
 
-                current_prompt = str(result)
+                current_prompt = prompt_builder.build_feedback_prompt(
+                    user_input=user_input,
+                    tool_name=tool_call.tool_name,
+                    tool_arguments=tool_call.arguments,
+                    tool_result=result,
+                )
 
             except AuthorizationDeniedError as e:
                 self._emit_event(

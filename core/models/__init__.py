@@ -9,6 +9,11 @@ from core.models.ollama import (
     OllamaTimeoutError,
 )
 from core.models.tool_call import ToolCall
+from core.models.tool_schema import (
+    PromptBuilder,
+    generate_registry_schema,
+    generate_tool_schema,
+)
 
 __all__ = [
     "ModelAdapter",
@@ -20,5 +25,9 @@ __all__ = [
     "OllamaConnectionError",
     "OllamaTimeoutError",
     "OllamaResponseError",
+    "PromptBuilder",
+    "generate_tool_schema",
+    "generate_registry_schema",
 ]
+
 
