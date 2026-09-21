@@ -270,6 +270,26 @@ class TestParserHardening(unittest.TestCase):
             self.agent._parse_response(raw)
         self.assertIn("Prose mixed with tool-call JSON is not permitted", str(ctx.exception))
 
+    def test_concatenated_tool_calls_rejected(self) -> None:
+        """12. Concatenated multiple tool-call JSON objects are strictly rejected."""
+        raw = (
+            '{"type": "tool_call", "tool": "calculator", "arguments": {"operation": "add", "a": 1, "b": 2}}\n'
+            '{"type": "tool_call", "tool": "calculator", "arguments": {"operation": "multiply", "a": 3, "b": 4}}'
+        )
+        with self.assertRaises(ValueError) as ctx:
+            self.agent._parse_response(raw)
+        self.assertIn("Malformed tool-call JSON", str(ctx.exception))
+        self.assertIn("Extra data", str(ctx.exception))
+
+    def test_array_of_tool_calls_rejected(self) -> None:
+        """13. Array of tool calls is strictly rejected."""
+        raw = json.dumps([
+            {"type": "tool_call", "tool": "calculator", "arguments": {"operation": "add", "a": 1, "b": 2}},
+        ])
+        with self.assertRaises(ValueError) as ctx:
+            self.agent._parse_response(raw)
+        self.assertIn("Array of tool calls is not permitted", str(ctx.exception))
+
 
 class TestAgentProtocolIntegration(unittest.TestCase):
     """End-to-end integration tests for the tool protocol with FakeOllamaServer."""

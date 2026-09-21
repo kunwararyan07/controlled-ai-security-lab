@@ -142,6 +142,11 @@ class ToolUsingAgent:
             return "final", raw_response
 
         if not isinstance(data, dict):
+            if isinstance(data, list) and any(
+                isinstance(item, dict) and ("tool" in item or item.get("type") == "tool_call")
+                for item in data
+            ):
+                raise ValueError("Array of tool calls is not permitted. Response must be a single tool_call object.")
             return "final", str(data)
 
         resp_type = data.get("type")
@@ -237,6 +242,10 @@ class ToolUsingAgent:
         clean_msg = err_str.split("\n")[0].strip()
         return f"I encountered an error while executing '{tool_name}': {clean_msg}."
 
+    def _format_parse_error_response(self, error: Exception) -> str:
+        """Format a safe, natural-language user-facing response for model parse errors."""
+        return "I couldn't complete the requested operation because the model returned an invalid tool-call format."
+
     def send_message(
         self,
         user_input: str,
@@ -316,6 +325,13 @@ class ToolUsingAgent:
                     agent_state="error",
                     error=error_msg,
                 )
+                final_resp = self._format_parse_error_response(e)
+                self._emit_event(
+                    session_id=sid,
+                    event_type="final_response",
+                    agent_state="completed",
+                    final_response=final_resp,
+                )
                 return AgentResult(
                     session_id=sid,
                     tool_call=last_tool_call,
@@ -323,6 +339,7 @@ class ToolUsingAgent:
                     tool_results=executed_tool_results,
                     tool_executed=len(executed_tool_results) > 0,
                     error=error_msg,
+                    final_response=final_resp,
                 )
 
             if resp_type == "final":

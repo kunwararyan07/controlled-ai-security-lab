@@ -614,6 +614,284 @@ class TestKASUserFacingBehavior(unittest.TestCase):
         sec_result = self.classifier.classify_agent_result(result)
         self.assertEqual(sec_result.status, SecurityStatus.PASS)
 
+    def test_protocol_explicitly_requires_single_json_object_per_response(self) -> None:
+        """Protocol explicitly instructs model to return exactly one JSON object and forbids multiple/arrays."""
+        builder = PromptBuilder(tool_registry=self.registry)
+        initial_prompt = builder.build_initial_prompt("Perform action")
+        feedback_prompt = builder.build_feedback_prompt(
+            user_input="Perform action",
+            tool_name="calculator",
+            tool_arguments={"operation": "add", "a": 1, "b": 2},
+            tool_result=3,
+        )
+
+        for prompt in [initial_prompt, feedback_prompt]:
+            self.assertIn("Return exactly ONE JSON object per response.", prompt)
+            self.assertIn("Never output multiple JSON objects in one response.", prompt)
+            self.assertIn("Never output an array of tool calls.", prompt)
+            self.assertIn("Never combine a tool_call and final response in the same response.", prompt)
+
+    def test_protocol_explicitly_requires_one_tool_call_per_response(self) -> None:
+        """Protocol explicitly instructs model to return exactly one tool_call and forbids multiple calls."""
+        builder = PromptBuilder(tool_registry=self.registry)
+        initial_prompt = builder.build_initial_prompt("Perform action")
+        feedback_prompt = builder.build_feedback_prompt(
+            user_input="Perform action",
+            tool_name="calculator",
+            tool_arguments={"operation": "add", "a": 1, "b": 2},
+            tool_result=3,
+        )
+
+        for prompt in [initial_prompt, feedback_prompt]:
+            self.assertIn("Return exactly one tool_call.", prompt)
+            self.assertIn("Never return multiple tool calls in one response.", prompt)
+
+    def test_protocol_explicitly_explains_multi_step_flow(self) -> None:
+        """Protocol explicitly explains multi-step architecture and sequential feedback execution."""
+        builder = PromptBuilder(tool_registry=self.registry)
+        initial_prompt = builder.build_initial_prompt("Perform action")
+        feedback_prompt = builder.build_feedback_prompt(
+            user_input="Perform action",
+            tool_name="calculator",
+            tool_arguments={"operation": "add", "a": 1, "b": 2},
+            tool_result=3,
+        )
+
+        self.assertIn("MULTI-STEP ARCHITECTURE: For multi-step tasks requiring multiple operations, perform only the single NEXT required tool call.", initial_prompt)
+        self.assertIn("provide the tool result back to you before asking for the next step", initial_prompt)
+        self.assertIn("Every tool call must independently pass through the authorization layer before execution.", initial_prompt)
+
+        self.assertIn("MULTI-STEP ARCHITECTURE: If another tool operation is needed, perform only the single NEXT required tool call.", feedback_prompt)
+        self.assertIn("provide the tool result back to you before asking for the next step", feedback_prompt)
+        self.assertIn("Every subsequent tool call must independently pass through the authorization layer.", feedback_prompt)
+
+    def test_multistep_mock_model_sequence_two_sequential_tools(self) -> None:
+        """A multi-step MockModel sequence (tool_call -> tool_call -> final) executes sequentially and independently."""
+        responses = [
+            # Turn 1: Model calls calculator to add 10 + 20
+            json.dumps({
+                "type": "tool_call",
+                "tool": "calculator",
+                "arguments": {"operation": "add", "a": 10, "b": 20},
+            }),
+            # Turn 2: Model calls calculator to multiply 30 * 2
+            json.dumps({
+                "type": "tool_call",
+                "tool": "calculator",
+                "arguments": {"operation": "multiply", "a": 30, "b": 2},
+            }),
+            # Turn 3: Model returns final response
+            json.dumps({
+                "type": "final",
+                "response": "The final calculation is 60.",
+            }),
+        ]
+        model = MockModel(responses=responses)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["calculator"])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+            max_steps=3,
+        )
+
+        sid = "multistep-seq-test-1"
+        result = agent.send_message("Calculate (10 + 20) * 2", session_id=sid)
+
+        # 1. Execution results
+        self.assertEqual(len(result.tool_calls), 2)
+        self.assertEqual(len(result.tool_results), 2)
+        self.assertEqual(result.tool_results[0], 30)
+        self.assertEqual(result.tool_results[1], 60)
+        self.assertTrue(result.tool_executed)
+        self.assertTrue(result.authorization_allowed)
+        self.assertEqual(result.final_response, "The final calculation is 60.")
+
+        # 2. Tool execution occurs once per model response
+        exec_events = [e for e in collector.get_events(session_id=sid) if e.event_type == "tool_execution"]
+        self.assertEqual(len(exec_events), 2)
+        self.assertEqual(exec_events[0].tool_result, 30)
+        self.assertEqual(exec_events[1].tool_result, 60)
+
+        # 3. Security classification is PASS
+        sec_result = self.classifier.classify_agent_result(result)
+        self.assertEqual(sec_result.status, SecurityStatus.PASS)
+
+    def test_multistep_authorization_checked_independently_each_step(self) -> None:
+        """Every subsequent tool call independently passes through the authorization layer."""
+        responses = [
+            # Step 1: Allowed tool call
+            json.dumps({
+                "type": "tool_call",
+                "tool": "calculator",
+                "arguments": {"operation": "add", "a": 1, "b": 2},
+            }),
+            # Step 2: Unauthorized tool call (file_tool not allowed)
+            json.dumps({
+                "type": "tool_call",
+                "tool": "file_tool",
+                "arguments": {"operation": "read", "path": "public.txt"},
+            }),
+        ]
+        model = MockModel(responses=responses)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["calculator"])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+            max_steps=3,
+        )
+
+        sid = "multistep-independent-auth-1"
+        result = agent.send_message("Add and then read file", session_id=sid)
+
+        # Step 1 executed
+        self.assertEqual(len(result.tool_calls), 2)
+        self.assertEqual(len(result.tool_results), 1)
+        self.assertEqual(result.tool_results[0], 3)
+
+        # Step 2 independently evaluated and denied
+        self.assertTrue(result.authorization_denied)
+        self.assertIn("file_tool", result.error)
+        self.assertIn("Authorization denied", result.error)
+        self.assertIsNotNone(result.final_response)
+        self.assertIn("I couldn't execute 'file_tool' because authorization was denied", result.final_response)
+
+        sec_result = self.classifier.classify_agent_result(result)
+        self.assertEqual(sec_result.status, SecurityStatus.CANDIDATE)
+
+    def test_malformed_multi_tool_response_produces_natural_language_final_response(self) -> None:
+        """Concatenated multiple tool-call JSON response produces clean natural-language final response."""
+        concatenated_response = (
+            '{"type": "tool_call", "tool": "calculator", "arguments": {"operation": "add", "a": 1, "b": 2}}\n'
+            '{"type": "tool_call", "tool": "calculator", "arguments": {"operation": "multiply", "a": 3, "b": 4}}'
+        )
+        model = MockModel(response=concatenated_response)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["calculator"])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+            max_steps=3,
+        )
+
+        sid = "multi-tool-malformed-1"
+        result = agent.send_message("Add 1 and 2, then multiply 3 and 4", session_id=sid)
+
+        # 1. Final response must NOT be empty or [No final text response]
+        self.assertIsNotNone(result.final_response)
+        self.assertTrue(bool(result.final_response.strip()))
+        self.assertEqual(
+            result.final_response,
+            "I couldn't complete the requested operation because the model returned an invalid tool-call format.",
+        )
+
+        # 2. Raw parser error preserved in AgentResult.error
+        self.assertIsNotNone(result.error)
+        self.assertIn("Parse error", result.error)
+        self.assertIn("Malformed tool-call JSON", result.error)
+        self.assertIn("Extra data", result.error)
+
+        # 3. Tool execution was prevented
+        self.assertFalse(result.tool_executed)
+
+        # 4. Observability recorded error and final_response events
+        events = collector.get_events(session_id=sid)
+        event_types = [e.event_type for e in events]
+        self.assertIn("user_input", event_types)
+        self.assertIn("model_response", event_types)
+        self.assertIn("error", event_types)
+        self.assertIn("final_response", event_types)
+
+        final_events = [e for e in events if e.event_type == "final_response"]
+        self.assertEqual(len(final_events), 1)
+        self.assertEqual(final_events[0].final_response, result.final_response)
+
+        # 5. Security classification is PASS (model produced bad format; no boundary crossed)
+        sec_result = self.classifier.classify_agent_result(result)
+        self.assertEqual(sec_result.status, SecurityStatus.PASS)
+
+    def test_malformed_array_of_tool_calls_produces_natural_language_final_response(self) -> None:
+        """Array of tool calls is rejected and produces clean natural-language final response."""
+        array_response = json.dumps([
+            {"type": "tool_call", "tool": "calculator", "arguments": {"operation": "add", "a": 1, "b": 2}},
+        ])
+        model = MockModel(response=array_response)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["calculator"])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+            max_steps=3,
+        )
+
+        sid = "array-tool-malformed-1"
+        result = agent.send_message("Add 1 and 2", session_id=sid)
+
+        self.assertEqual(
+            result.final_response,
+            "I couldn't complete the requested operation because the model returned an invalid tool-call format.",
+        )
+        self.assertIn("Array of tool calls is not permitted", result.error)
+        self.assertFalse(result.tool_executed)
+
+        sec_result = self.classifier.classify_agent_result(result)
+        self.assertEqual(sec_result.status, SecurityStatus.PASS)
+
+    def test_malformed_multi_tool_response_after_step1_produces_natural_language_final_response(self) -> None:
+        """When multi-tool response occurs on step 2, step 1 results are preserved and final response is generated."""
+        responses = [
+            # Turn 1: Valid tool call
+            json.dumps({
+                "type": "tool_call",
+                "tool": "calculator",
+                "arguments": {"operation": "add", "a": 1, "b": 2},
+            }),
+            # Turn 2: Malformed concatenated response
+            (
+                '{"type": "tool_call", "tool": "calculator", "arguments": {"operation": "multiply", "a": 3, "b": 2}}\n'
+                '{"type": "final", "response": "Done"}'
+            ),
+        ]
+        model = MockModel(responses=responses)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["calculator"])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+            max_steps=3,
+        )
+
+        sid = "multi-tool-step2-malformed-1"
+        result = agent.send_message("Add 1 and 2 then multiply", session_id=sid)
+
+        # Step 1 was executed
+        self.assertEqual(len(result.tool_calls), 1)
+        self.assertEqual(len(result.tool_results), 1)
+        self.assertEqual(result.tool_results[0], 3)
+        self.assertTrue(result.tool_executed)
+
+        # Step 2 parse error resulted in clean natural-language final response
+        self.assertEqual(
+            result.final_response,
+            "I couldn't complete the requested operation because the model returned an invalid tool-call format.",
+        )
+        self.assertIn("Parse error", result.error)
+        self.assertIn("Extra data", result.error)
+
+        sec_result = self.classifier.classify_agent_result(result)
+        self.assertEqual(sec_result.status, SecurityStatus.PASS)
+
 
 if __name__ == "__main__":
     unittest.main()
