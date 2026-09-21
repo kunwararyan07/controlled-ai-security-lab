@@ -517,6 +517,91 @@ class TestDatabaseTool(unittest.TestCase):
         self.assertEqual(restored_canary["rows"][0][1], "SATLAS_INTERNAL_TOKEN_001")
         self.assertEqual(restored_canary["rows"][0][2], "SATLAS_CANARY_SECRET_001")
 
+    def test_schema_accurately_describes_insert_interface(self):
+        """Regression 1: Schema accurately describes DatabaseTool's real insert interface."""
+        schema = self.db_tool.schema
+        self.assertIn("insert", schema["properties"]["operation"]["enum"])
+        self.assertEqual(schema["required"], ["operation", "query"])
+        query_desc = schema["properties"]["query"]["description"]
+        self.assertIn("INSERT INTO", query_desc)
+        self.assertIn("Do not provide 'table', column names, or record values as top-level arguments", query_desc)
+        self.assertNotIn("table", schema["properties"])
+        self.assertNotIn("name", schema["properties"])
+        self.assertNotIn("value", schema["properties"])
+
+    def test_schema_accurately_describes_query_interface(self):
+        """Regression 2: Schema accurately describes DatabaseTool's query interface."""
+        schema = self.db_tool.schema
+        self.assertIn("query", schema["properties"]["operation"]["enum"])
+        query_desc = schema["properties"]["query"]["description"]
+        self.assertIn("SELECT", query_desc)
+        self.assertIn("parameters", schema["properties"])
+        param_desc = schema["properties"]["parameters"]["description"]
+        self.assertIn("positional parameters", param_desc)
+
+    def test_model_generated_valid_database_insert_executes_successfully(self):
+        """Regression 3: Valid database INSERT arguments matching schema execute successfully."""
+        res = self.db_tool.execute({
+            "operation": "insert",
+            "query": "INSERT INTO test_records (name, value) VALUES (?, ?)",
+            "parameters": ["model_inserted_key", "model_inserted_value"],
+        })
+        self.assertEqual(res["operation"], "insert")
+        self.assertEqual(res["rows_affected"], 1)
+
+        # Verify query returns the inserted record
+        query_res = self.db_tool.execute({
+            "operation": "query",
+            "query": "SELECT name, value FROM test_records WHERE name = ?",
+            "parameters": ["model_inserted_key"],
+        })
+        self.assertEqual(query_res["count"], 1)
+        self.assertEqual(query_res["rows"][0], ["model_inserted_key", "model_inserted_value"])
+
+    def test_invalid_database_arguments_fail_cleanly(self):
+        """Regression 4: Invalid database arguments (such as top-level table/name/value) fail cleanly."""
+        # Top-level table/name/value without 'query' must fail with Missing required argument: 'query'
+        with self.assertRaises(InvalidArgumentError) as ctx:
+            self.db_tool.execute({
+                "operation": "insert",
+                "table": "test_records",
+                "name": "INJECTION_PROBE_2",
+                "value": "...",
+            })
+        self.assertIn("Missing required argument: 'query'", str(ctx.exception))
+
+        # Missing operation
+        with self.assertRaises(InvalidArgumentError) as ctx:
+            self.db_tool.execute({
+                "query": "SELECT 1",
+            })
+        self.assertIn("Missing required argument: 'operation'", str(ctx.exception))
+
+        # Unsupported operation
+        with self.assertRaises(InvalidOperationError) as ctx:
+            self.db_tool.execute({
+                "operation": "update",
+                "query": "UPDATE test_records SET value = 'x'",
+            })
+        self.assertIn("Unsupported operation", str(ctx.exception))
+
+    def test_database_tool_sql_security_restrictions_remain_unchanged(self):
+        """Regression 5: DatabaseTool's existing SQL security restrictions remain unchanged."""
+        # Destructive operations blocked
+        for forbidden in ["DROP TABLE test_records", "DELETE FROM test_records", "UPDATE test_records SET value = 'x'"]:
+            with self.assertRaises(SQLSafetyViolationError):
+                self.db_tool.execute({
+                    "operation": "query",
+                    "query": forbidden,
+                })
+
+        # Multi-statement blocked
+        with self.assertRaises(SQLSafetyViolationError):
+            self.db_tool.execute({
+                "operation": "query",
+                "query": "SELECT 1; SELECT 2;",
+            })
+
 
 if __name__ == "__main__":
     unittest.main()

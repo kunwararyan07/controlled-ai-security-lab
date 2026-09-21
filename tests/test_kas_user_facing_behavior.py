@@ -17,10 +17,16 @@ from core.models.tool_schema import (
 )
 from core.security.classifier import SecurityClassifier, SecurityStatus
 from tools.calculator import CalculatorTool
+from tools.database_tool import DatabaseTool
 from tools.file_tool import FileTool
+from tools.notification_tool import NotificationTool
 
 
-from scripts.run_tool_agent import DEFAULT_KAS_MODEL_OPTIONS, setup_agent
+from scripts.run_tool_agent import (
+    DEFAULT_KAS_MODEL_OPTIONS,
+    format_agent_result,
+    setup_agent,
+)
 
 
 class TestKASUserFacingBehavior(unittest.TestCase):
@@ -47,10 +53,15 @@ class TestKASUserFacingBehavior(unittest.TestCase):
             f.write("Sample content")
 
         self.file_tool = FileTool(root_path=self.sandbox_path)
+        self.db_path = os.path.join(self.temp_dir, "test.db")
+        self.db_tool = DatabaseTool(database_path=self.db_path)
+        self.notif_tool = NotificationTool()
 
         self.registry = ToolRegistry()
         self.registry.register(self.calc)
         self.registry.register(self.file_tool)
+        self.registry.register(self.db_tool)
+        self.registry.register(self.notif_tool)
 
         self.collector = EventCollector()
         self.classifier = SecurityClassifier()
@@ -891,6 +902,422 @@ class TestKASUserFacingBehavior(unittest.TestCase):
 
         sec_result = self.classifier.classify_agent_result(result)
         self.assertEqual(sec_result.status, SecurityStatus.PASS)
+
+    def test_database_tool_successful_result_reported_as_database_tool_result(self) -> None:
+        """Regression 6: DatabaseTool successful result is reported as DatabaseTool result."""
+        responses = [
+            json.dumps({
+                "type": "tool_call",
+                "tool": "database_tool",
+                "arguments": {"operation": "query", "query": "SELECT 1 AS num"},
+            }),
+            json.dumps({
+                "type": "final",
+                "response": "The query returned 1.",
+            }),
+        ]
+        model = MockModel(responses=responses)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["database_tool"])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+            max_steps=3,
+        )
+
+        result = agent.send_message("Query database", session_id="db-success-1")
+
+        self.assertTrue(result.tool_executed)
+        self.assertEqual(result.tool_call.tool_name, "database_tool")
+        self.assertIsInstance(result.tool_result, dict)
+        self.assertEqual(result.tool_result["operation"], "query")
+        self.assertEqual(result.tool_result["rows"], [[1]])
+
+        report = format_agent_result(result, self.classifier)
+        self.assertIn("Tool Name:              database_tool", report)
+        self.assertIn("Execution Status:       EXECUTED", report)
+        self.assertIn('"operation": "query"', report)
+        self.assertNotIn("notification_id", report)
+
+    def test_notification_tool_successful_result_reported_as_notification_tool_result(self) -> None:
+        """Regression 7: NotificationTool successful result is reported as NotificationTool result."""
+        responses = [
+            json.dumps({
+                "type": "tool_call",
+                "tool": "notification_tool",
+                "arguments": {
+                    "operation": "send",
+                    "recipient": "canary_user@satlas.local",
+                    "subject": "Test",
+                    "body": "Hello",
+                },
+            }),
+            json.dumps({
+                "type": "final",
+                "response": "Notification sent.",
+            }),
+        ]
+        model = MockModel(responses=responses)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["notification_tool"])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+            max_steps=3,
+        )
+
+        result = agent.send_message("Send notification", session_id="notif-success-1")
+
+        self.assertTrue(result.tool_executed)
+        self.assertEqual(result.tool_call.tool_name, "notification_tool")
+        self.assertIsInstance(result.tool_result, dict)
+        self.assertTrue(result.tool_result["success"])
+        self.assertIn("notification_id", result.tool_result)
+
+        report = format_agent_result(result, self.classifier)
+        self.assertIn("Tool Name:              notification_tool", report)
+        self.assertIn("Execution Status:       EXECUTED", report)
+        self.assertIn("notification_id", report)
+
+    def test_failed_database_tool_cannot_display_previous_notification_result(self) -> None:
+        """Regression 8: A failed DatabaseTool call in step 2 cannot display a step 1 NotificationTool result."""
+        responses = [
+            # Step 1: Successful notification
+            json.dumps({
+                "type": "tool_call",
+                "tool": "notification_tool",
+                "arguments": {
+                    "operation": "send",
+                    "recipient": "canary_user@satlas.local",
+                    "subject": "Alert",
+                    "body": "Test alert",
+                },
+            }),
+            # Step 2: Malformed database call (missing required 'query')
+            json.dumps({
+                "type": "tool_call",
+                "tool": "database_tool",
+                "arguments": {
+                    "operation": "insert",
+                    "table": "test_records",
+                    "name": "INJECTION_PROBE_2",
+                    "value": "...",
+                },
+            }),
+        ]
+        model = MockModel(responses=responses)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["notification_tool", "database_tool"])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+            max_steps=3,
+        )
+
+        result = agent.send_message("Send alert then insert to db", session_id="notif-then-db-fail-1")
+
+        # 1. Step 2 failed and was NOT executed
+        self.assertFalse(result.tool_executed)
+        self.assertEqual(result.tool_call.tool_name, "database_tool")
+
+        # 2. INVARIANT: result.tool_result for the failed call must be None!
+        self.assertIsNone(result.tool_result)
+
+        # 3. Step 1's notification result is in tool_results
+        self.assertEqual(len(result.tool_results), 1)
+        self.assertIn("notification_id", result.tool_results[0])
+
+        # 4. CLI report must NOT display notification result as the database tool result
+        report = format_agent_result(result, self.classifier)
+        self.assertIn("Tool Name:              database_tool", report)
+        self.assertIn("Execution Status:       NOT EXECUTED", report)
+        # Verify "Tool Result:" is NOT displayed under database_tool
+        lines = report.split("\n")
+        tool_result_lines = [l for l in lines if l.strip().startswith("Tool Result:")]
+        self.assertEqual(len(tool_result_lines), 0)
+
+        # Verify execution history clearly distinguishes step 1 and step 2
+        self.assertIn("notification_tool: EXECUTED", report)
+        self.assertIn("database_tool: NOT EXECUTED", report)
+
+    def test_not_executed_tool_cannot_display_previous_successful_tool_result(self) -> None:
+        """Regression 9: An unexecuted tool call cannot display a previous successful tool result in AgentResult."""
+        res = AgentResult(
+            tool_call=ToolCall(tool_name="database_tool", arguments={"operation": "insert"}),
+            tool_calls=[
+                ToolCall(tool_name="notification_tool", arguments={"operation": "send"}),
+                ToolCall(tool_name="database_tool", arguments={"operation": "insert"}),
+            ],
+            tool_results=[
+                {"success": True, "notification_id": "notification_002", "recipient": "canary_user@satlas.local"}
+            ],
+            tool_executed=False,
+        )
+
+        # Invariant: tool_result must be None when tool_executed is False
+        self.assertIsNone(res.tool_result)
+
+        report = format_agent_result(res, self.classifier)
+        lines = [l.strip() for l in report.split("\n")]
+        self.assertIn("Tool Name:              database_tool", lines)
+        self.assertIn("Execution Status:       NOT EXECUTED", lines)
+        self.assertFalse(any(l.startswith("Tool Result:") for l in lines))
+
+    def test_sequential_database_to_notification_preserves_separate_results(self) -> None:
+        """Regression 10: Sequential DatabaseTool -> NotificationTool operations preserve separate results."""
+        responses = [
+            # Turn 1: Database query
+            json.dumps({
+                "type": "tool_call",
+                "tool": "database_tool",
+                "arguments": {"operation": "query", "query": "SELECT 42 AS val"},
+            }),
+            # Turn 2: Notification send
+            json.dumps({
+                "type": "tool_call",
+                "tool": "notification_tool",
+                "arguments": {
+                    "operation": "send",
+                    "recipient": "canary_user@satlas.local",
+                    "subject": "DB Result",
+                    "body": "Value is 42",
+                },
+            }),
+            # Turn 3: Final
+            json.dumps({
+                "type": "final",
+                "response": "Database query completed and notification sent.",
+            }),
+        ]
+        model = MockModel(responses=responses)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["database_tool", "notification_tool"])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+            max_steps=3,
+        )
+
+        result = agent.send_message("Query db and notify", session_id="db-then-notif-1")
+
+        self.assertTrue(result.tool_executed)
+        self.assertEqual(len(result.tool_calls), 2)
+        self.assertEqual(len(result.tool_results), 2)
+
+        # Step 1: DatabaseTool
+        self.assertEqual(result.tool_calls[0].tool_name, "database_tool")
+        self.assertEqual(result.tool_results[0]["operation"], "query")
+        self.assertEqual(result.tool_results[0]["rows"], [[42]])
+
+        # Step 2: NotificationTool
+        self.assertEqual(result.tool_calls[1].tool_name, "notification_tool")
+        self.assertTrue(result.tool_results[1]["success"])
+        self.assertIn("notification_id", result.tool_results[1])
+
+        # Results must be completely distinct
+        self.assertNotEqual(result.tool_results[0], result.tool_results[1])
+
+    def test_sequential_notification_to_database_preserves_separate_results(self) -> None:
+        """Regression 11: Sequential NotificationTool -> DatabaseTool operations preserve separate results."""
+        responses = [
+            # Turn 1: Notification send
+            json.dumps({
+                "type": "tool_call",
+                "tool": "notification_tool",
+                "arguments": {
+                    "operation": "send",
+                    "recipient": "canary_user@satlas.local",
+                    "subject": "Starting DB work",
+                    "body": "Starting",
+                },
+            }),
+            # Turn 2: Database query
+            json.dumps({
+                "type": "tool_call",
+                "tool": "database_tool",
+                "arguments": {"operation": "query", "query": "SELECT 99 AS count"},
+            }),
+            # Turn 3: Final
+            json.dumps({
+                "type": "final",
+                "response": "Notification sent and database query executed.",
+            }),
+        ]
+        model = MockModel(responses=responses)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["notification_tool", "database_tool"])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+            max_steps=3,
+        )
+
+        result = agent.send_message("Notify and query db", session_id="notif-then-db-1")
+
+        self.assertTrue(result.tool_executed)
+        self.assertEqual(len(result.tool_calls), 2)
+        self.assertEqual(len(result.tool_results), 2)
+
+        # Step 1: NotificationTool
+        self.assertEqual(result.tool_calls[0].tool_name, "notification_tool")
+        self.assertTrue(result.tool_results[0]["success"])
+        self.assertIn("notification_id", result.tool_results[0])
+
+        # Step 2: DatabaseTool
+        self.assertEqual(result.tool_calls[1].tool_name, "database_tool")
+        self.assertEqual(result.tool_results[1]["operation"], "query")
+        self.assertEqual(result.tool_results[1]["rows"], [[99]])
+
+        # Results must be completely distinct
+        self.assertNotEqual(result.tool_results[0], result.tool_results[1])
+
+    def test_multistep_results_remain_correctly_ordered(self) -> None:
+        """Regression 12: Multi-step results across 3 different tools remain correctly ordered."""
+        responses = [
+            # Step 1: Calculator
+            json.dumps({
+                "type": "tool_call",
+                "tool": "calculator",
+                "arguments": {"operation": "add", "a": 5, "b": 10},
+            }),
+            # Step 2: Database query
+            json.dumps({
+                "type": "tool_call",
+                "tool": "database_tool",
+                "arguments": {"operation": "query", "query": "SELECT 15 AS sum_val"},
+            }),
+            # Step 3: Notification send
+            json.dumps({
+                "type": "tool_call",
+                "tool": "notification_tool",
+                "arguments": {
+                    "operation": "send",
+                    "recipient": "canary_user@satlas.local",
+                    "subject": "Sum",
+                    "body": "The sum is 15",
+                },
+            }),
+        ]
+        model = MockModel(responses=responses)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["calculator", "database_tool", "notification_tool"])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+            max_steps=3,
+        )
+
+        result = agent.send_message("Calculate, query, and notify", session_id="3step-order-1")
+
+        self.assertEqual(len(result.tool_calls), 3)
+        self.assertEqual(len(result.tool_results), 3)
+
+        # Verify ordering
+        self.assertEqual(result.tool_calls[0].tool_name, "calculator")
+        self.assertEqual(result.tool_results[0], 15)
+
+        self.assertEqual(result.tool_calls[1].tool_name, "database_tool")
+        self.assertEqual(result.tool_results[1]["operation"], "query")
+        self.assertEqual(result.tool_results[1]["rows"], [[15]])
+
+        self.assertEqual(result.tool_calls[2].tool_name, "notification_tool")
+        self.assertTrue(result.tool_results[2]["success"])
+        self.assertIn("notification_id", result.tool_results[2])
+
+    def test_session_reset_clear_logs_cannot_leak_previous_tool_results(self) -> None:
+        """Regression 13: Session reset/clear_logs cannot leak previous tool results into a new interaction."""
+        # Interaction 1: NotificationTool executes in session_A
+        m1 = MockModel(responses=[
+            json.dumps({
+                "type": "tool_call",
+                "tool": "notification_tool",
+                "arguments": {
+                    "operation": "send",
+                    "recipient": "canary_user@satlas.local",
+                    "subject": "Prior",
+                    "body": "Prior body",
+                },
+            }),
+        ])
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["notification_tool", "database_tool"])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=m1,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+            max_steps=3,
+        )
+
+        r1 = agent.send_message("Send prior notification", session_id="session_A")
+        self.assertTrue(r1.tool_executed)
+        self.assertIn("notification_id", r1.tool_result)
+
+        # Clear logs and reset
+        agent.reset()
+        agent.clear_logs()
+
+        # Interaction 2: Failing DatabaseTool call in session_B
+        m2 = MockModel(responses=[
+            json.dumps({
+                "type": "tool_call",
+                "tool": "database_tool",
+                "arguments": {"operation": "insert", "table": "test_records"},
+            }),
+        ])
+        agent.model = m2
+
+        r2 = agent.send_message("Failing insert", session_id="session_B")
+        self.assertFalse(r2.tool_executed)
+        self.assertIsNone(r2.tool_result)
+        self.assertEqual(len(r2.tool_results), 0)
+
+        # Verify collector has no cross-session leakage
+        events_b = collector.get_events(session_id="session_B")
+        for e in events_b:
+            self.assertNotIn("notification_id", str(e.to_dict()))
+
+    def test_agent_result_singular_plural_fields_remain_consistent(self) -> None:
+        """Regression 14: AgentResult singular and plural fields remain consistent and never cross-contaminate."""
+        tc1 = ToolCall(tool_name="calculator", arguments={"operation": "add", "a": 1, "b": 2})
+        tc2 = ToolCall(tool_name="database_tool", arguments={"operation": "insert", "query": "INSERT INTO ..."})
+
+        # Case A: Executed single tool
+        res_a = AgentResult(tool_call=tc1, tool_result=3, tool_executed=True)
+        self.assertEqual(res_a.tool_calls, [tc1])
+        self.assertEqual(res_a.tool_results, [3])
+        self.assertEqual(res_a.tool_call, tc1)
+        self.assertEqual(res_a.tool_result, 3)
+
+        # Case B: Executed multi-step tools
+        res_b = AgentResult(tool_calls=[tc1, tc2], tool_results=[3, {"rows_affected": 1}], tool_executed=True)
+        self.assertEqual(res_b.tool_call, tc2)
+        self.assertEqual(res_b.tool_result, {"rows_affected": 1})
+
+        # Case C: Step 1 executed, Step 2 NOT executed
+        res_c = AgentResult(tool_call=tc2, tool_calls=[tc1, tc2], tool_results=[3], tool_executed=False)
+        self.assertEqual(res_c.tool_call, tc2)
+        self.assertIsNone(res_c.tool_result)  # Must NOT inherit 3 from tool_results!
+        self.assertEqual(res_c.tool_results, [3])
+
+        # Case D: Single unexecuted tool
+        res_d = AgentResult(tool_call=tc1, tool_executed=False)
+        self.assertEqual(res_d.tool_call, tc1)
+        self.assertIsNone(res_d.tool_result)
+        self.assertEqual(res_d.tool_calls, [tc1])
+        self.assertEqual(res_d.tool_results, [])
 
 
 if __name__ == "__main__":

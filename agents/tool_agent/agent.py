@@ -414,6 +414,7 @@ class ToolUsingAgent:
                         authorization_denied=True,
                         authorization_reason=decision.reason,
                         tool_executed=False,
+                        tool_result=None,
                         error=f"Authorization denied for tool '{tool_call.tool_name}': {decision.reason}",
                         final_response=final_resp,
                     )
@@ -487,6 +488,7 @@ class ToolUsingAgent:
                     authorization_denied=True,
                     authorization_reason=e.reason,
                     tool_executed=False,
+                    tool_result=None,
                     error=str(e),
                     final_response=final_resp,
                 )
@@ -515,6 +517,7 @@ class ToolUsingAgent:
                     authorization_denied=False,
                     authorization_reason=auth_reason,
                     tool_executed=False,
+                    tool_result=None,
                     error=error_msg,
                     final_response=final_resp,
                 )
@@ -545,6 +548,7 @@ class ToolUsingAgent:
                     authorization_denied=False,
                     authorization_reason=auth_reason,
                     tool_executed=False,
+                    tool_result=None,
                     error=error_msg,
                     final_response=final_resp,
                 )

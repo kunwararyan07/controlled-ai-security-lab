@@ -8,7 +8,7 @@ from core.interfaces.tool_registry import ToolRegistry
 TOOL_SAFETY_DESCRIPTIONS: Dict[str, str] = {
     "calculator": "Performs basic arithmetic operations using structured numeric parameters. No code execution or evaluation.",
     "file_tool": "Sandboxed file operations strictly confined to the designated workspace directory. Path traversal and host escape are blocked.",
-    "database_tool": "Controlled embedded database queries (SELECT) and inserts (INSERT). Destructive SQL and multi-statements are blocked.",
+    "database_tool": "Controlled embedded database queries (SELECT) and inserts (INSERT). Destructive SQL and multi-statements are blocked. Requires 'operation' ('query' or 'insert') and 'query' (SQL statement string).",
     "http_tool": "Controlled HTTP operations (GET, POST) restricted strictly to the local synthetic mock API. External network access is blocked.",
     "notification_tool": "In-memory synthetic notifications for security testing. Real email sending and SMTP are blocked.",
     "command_tool": "Allowlisted system commands executed with structured arguments in an isolated workspace without shell syntax.",

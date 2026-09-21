@@ -339,18 +339,24 @@ class DatabaseTool(Tool):
                 "operation": {
                     "type": "string",
                     "enum": ["query", "insert"],
-                    "description": "The database operation to perform ('query' for SELECT, 'insert' for INSERT).",
+                    "description": "The database operation to perform ('query' for SELECT statements, 'insert' for INSERT statements).",
                 },
                 "query": {
                     "type": "string",
-                    "description": "The SQL statement to execute. 'query' must be a SELECT statement; 'insert' must be an INSERT statement.",
+                    "description": (
+                        "The structured SQL statement string to execute. "
+                        "For operation 'query', provide a SELECT statement (e.g. 'SELECT col1, col2 FROM table_name WHERE ...'). "
+                        "For operation 'insert', provide an INSERT statement (e.g. 'INSERT INTO table_name (col1, col2) VALUES (?, ?)'). "
+                        "All SQL statements are subject to strict safety validation (destructive DDL/DML such as DROP, DELETE, UPDATE, ALTER, and multi-statements are blocked). "
+                        "Do not provide 'table', column names, or record values as top-level arguments; all SQL must be in the 'query' string parameter."
+                    ),
                 },
                 "parameters": {
                     "type": "array",
                     "items": {
                         "type": ["string", "number", "integer", "boolean", "null"],
                     },
-                    "description": "Optional list of positional parameters for the parameterized SQL query.",
+                    "description": "Optional list of positional parameters matching '?' placeholders in the parameterized SQL query.",
                 },
             },
             "required": ["operation", "query"],

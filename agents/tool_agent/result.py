@@ -38,10 +38,18 @@ class AgentResult:
         elif self.tool_call is None and self.tool_calls:
             self.tool_call = self.tool_calls[-1]
 
-        if self.tool_result is not None and not self.tool_results:
-            self.tool_results = [self.tool_result]
-        elif self.tool_result is None and self.tool_results:
-            self.tool_result = self.tool_results[-1]
+        # Invariant: tool_result must only correspond to tool_call when tool_executed is True.
+        # A failed or unexecuted tool call must never have a tool_result or inherit a previous result.
+        if self.tool_executed:
+            if self.tool_result is not None and not self.tool_results:
+                self.tool_results = [self.tool_result]
+            elif self.tool_result is None and self.tool_results:
+                if len(self.tool_results) == len(self.tool_calls):
+                    self.tool_result = self.tool_results[-1]
+                else:
+                    self.tool_result = None
+        else:
+            self.tool_result = None
 
     @property
     def tool_requested(self) -> bool:

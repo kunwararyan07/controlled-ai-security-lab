@@ -99,7 +99,7 @@ def format_agent_result(result: AgentResult, classifier: SecurityClassifier) -> 
         exec_str = "EXECUTED" if result.tool_executed else "NOT EXECUTED"
         lines.append(f"  Execution Status:       {exec_str}")
 
-        if result.tool_result is not None:
+        if result.tool_executed and result.tool_result is not None:
             lines.append(f"  Tool Result:            {json.dumps(result.tool_result, default=str)}")
     else:
         lines.append("")
@@ -108,6 +108,13 @@ def format_agent_result(result: AgentResult, classifier: SecurityClassifier) -> 
     # 3. Multi-step summary if multiple tools were invoked
     if len(result.tool_calls) > 1:
         lines.append(f"  Total Tool Calls:       {len(result.tool_calls)}")
+        lines.append("  Execution History:")
+        for idx, tc in enumerate(result.tool_calls, 1):
+            if idx - 1 < len(result.tool_results):
+                status_desc = f"EXECUTED -> {json.dumps(result.tool_results[idx - 1], default=str)}"
+            else:
+                status_desc = "NOT EXECUTED"
+            lines.append(f"    [{idx}] {tc.tool_name}: {status_desc}")
 
     # 4. Errors
     if result.error:
