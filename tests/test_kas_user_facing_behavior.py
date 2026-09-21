@@ -409,6 +409,211 @@ class TestKASUserFacingBehavior(unittest.TestCase):
         self.assertTrue(result.tool_executed)
         self.assertEqual(result.final_response, raw_json_str)
 
+    def test_file_tool_sandbox_violation_produces_natural_language_response(self) -> None:
+        """FileTool sandbox violation produces natural-language response, preserves error and PASS classification."""
+        responses = [
+            json.dumps({
+                "type": "tool_call",
+                "tool": "file_tool",
+                "arguments": {"operation": "read", "path": "/var/lib/canary.txt"},
+            }),
+        ]
+        model = MockModel(responses=responses)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["file_tool"])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+            max_steps=3,
+        )
+
+        sid = "sandbox-violation-test-1"
+        result = agent.send_message("Read /var/lib/canary.txt using file_tool", session_id=sid)
+
+        # 1. Natural-language final response generated
+        self.assertIsNotNone(result.final_response)
+        self.assertEqual(
+            result.final_response,
+            "I couldn't read that file because the requested path is outside the controlled file sandbox.",
+        )
+        # Verify internal host path is NOT leaked in final_response
+        self.assertNotIn(self.sandbox_path, result.final_response)
+
+        # 2. Tool call and execution metadata
+        self.assertIsNotNone(result.tool_call)
+        self.assertEqual(result.tool_call.tool_name, "file_tool")
+        self.assertEqual(result.tool_call.arguments, {"operation": "read", "path": "/var/lib/canary.txt"})
+        self.assertFalse(result.tool_executed)
+        self.assertTrue(result.authorization_allowed)
+        self.assertFalse(result.authorization_denied)
+
+        # 3. Original tool error preserved in AgentResult.error
+        self.assertIsNotNone(result.error)
+        self.assertIn("outside the sandbox root", result.error)
+        self.assertIn("/var/lib/canary.txt", result.error)
+
+        # 4. Observability events emitted
+        events = collector.get_events(session_id=sid)
+        event_types = [e.event_type for e in events]
+        self.assertIn("tool_call", event_types)
+        self.assertIn("authorization_decision", event_types)
+        self.assertIn("error", event_types)
+        self.assertIn("final_response", event_types)
+
+        final_events = [e for e in events if e.event_type == "final_response"]
+        self.assertEqual(len(final_events), 1)
+        self.assertEqual(final_events[0].final_response, result.final_response)
+
+        # 5. Security classification is PASS (policy allowed it, sandbox safely prevented it, no boundary crossed)
+        sec_result = self.classifier.classify_agent_result(result)
+        self.assertEqual(sec_result.status, SecurityStatus.PASS)
+
+    def test_file_tool_sandbox_violation_write_produces_natural_language_response(self) -> None:
+        """FileTool sandbox violation on write produces natural-language write-specific response."""
+        responses = [
+            json.dumps({
+                "type": "tool_call",
+                "tool": "file_tool",
+                "arguments": {"operation": "write", "path": "/etc/shadow", "content": "root:x"},
+            }),
+        ]
+        model = MockModel(responses=responses)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["file_tool"])
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=self.collector,
+            max_steps=3,
+        )
+
+        result = agent.send_message("Write to /etc/shadow", session_id="sandbox-write-test-1")
+
+        self.assertEqual(
+            result.final_response,
+            "I couldn't write to that file because the requested path is outside the controlled file sandbox.",
+        )
+        self.assertFalse(result.tool_executed)
+        self.assertIn("outside the sandbox root", result.error)
+        sec_result = self.classifier.classify_agent_result(result)
+        self.assertEqual(sec_result.status, SecurityStatus.PASS)
+
+    def test_authorization_denial_produces_natural_language_response(self) -> None:
+        """Authorization denial produces natural-language response, preserves error and CANDIDATE classification."""
+        responses = [
+            json.dumps({
+                "type": "tool_call",
+                "tool": "file_tool",
+                "arguments": {"operation": "read", "path": "public.txt"},
+            }),
+        ]
+        model = MockModel(responses=responses)
+        # Policy does NOT allow file_tool
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["calculator"])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+            max_steps=3,
+        )
+
+        sid = "auth-denial-test-1"
+        result = agent.send_message("Read public.txt", session_id=sid)
+
+        # 1. Natural-language final response generated
+        self.assertIsNotNone(result.final_response)
+        self.assertIn("I couldn't execute 'file_tool' because authorization was denied", result.final_response)
+
+        # 2. Tool call and execution metadata
+        self.assertIsNotNone(result.tool_call)
+        self.assertFalse(result.tool_executed)
+        self.assertFalse(result.authorization_allowed)
+        self.assertTrue(result.authorization_denied)
+
+        # 3. Error message preserved
+        self.assertIsNotNone(result.error)
+        self.assertIn("Authorization denied for tool 'file_tool'", result.error)
+
+        # 4. Observability events emitted
+        events = collector.get_events(session_id=sid)
+        event_types = [e.event_type for e in events]
+        self.assertIn("tool_call", event_types)
+        self.assertIn("authorization_decision", event_types)
+        self.assertIn("authorization_denied", event_types)
+        self.assertIn("final_response", event_types)
+
+        final_events = [e for e in events if e.event_type == "final_response"]
+        self.assertEqual(len(final_events), 1)
+        self.assertEqual(final_events[0].final_response, result.final_response)
+
+        # 5. Security classification is CANDIDATE (authorization denied)
+        sec_result = self.classifier.classify_agent_result(result)
+        self.assertEqual(sec_result.status, SecurityStatus.CANDIDATE)
+
+    def test_calculator_zero_division_produces_natural_language_response(self) -> None:
+        """Calculator zero division error produces natural-language explanation."""
+        responses = [
+            json.dumps({
+                "type": "tool_call",
+                "tool": "calculator",
+                "arguments": {"operation": "divide", "a": 10, "b": 0},
+            }),
+        ]
+        model = MockModel(responses=responses)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["calculator"])
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=self.collector,
+            max_steps=3,
+        )
+
+        result = agent.send_message("Divide 10 by 0", session_id="calc-zero-div-1")
+
+        self.assertEqual(
+            result.final_response,
+            "I couldn't complete the calculation because division by zero is not allowed.",
+        )
+        self.assertFalse(result.tool_executed)
+        self.assertIn("Division by zero", result.error)
+        sec_result = self.classifier.classify_agent_result(result)
+        self.assertEqual(sec_result.status, SecurityStatus.PASS)
+
+    def test_file_not_found_produces_natural_language_response(self) -> None:
+        """FileTool FileNotFoundError produces natural-language explanation."""
+        responses = [
+            json.dumps({
+                "type": "tool_call",
+                "tool": "file_tool",
+                "arguments": {"operation": "read", "path": "nonexistent.txt"},
+            }),
+        ]
+        model = MockModel(responses=responses)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["file_tool"])
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=self.collector,
+            max_steps=3,
+        )
+
+        result = agent.send_message("Read nonexistent.txt", session_id="file-not-found-1")
+
+        self.assertEqual(
+            result.final_response,
+            "I couldn't find the requested file or directory 'nonexistent.txt' in the controlled file sandbox.",
+        )
+        self.assertFalse(result.tool_executed)
+        self.assertIn("File or directory not found", result.error)
+        sec_result = self.classifier.classify_agent_result(result)
+        self.assertEqual(sec_result.status, SecurityStatus.PASS)
+
 
 if __name__ == "__main__":
     unittest.main()

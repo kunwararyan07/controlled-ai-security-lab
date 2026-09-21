@@ -175,6 +175,68 @@ class ToolUsingAgent:
 
         return "final", raw_response
 
+    def _format_authorization_denied_response(self, tool_name: str, reason: Optional[str]) -> str:
+        """Format a safe, natural-language user-facing response for authorization denials."""
+        if reason:
+            return f"I couldn't execute '{tool_name}' because authorization was denied: {reason}."
+        return f"I couldn't execute '{tool_name}' because authorization was denied by policy."
+
+    def _format_execution_error_response(
+        self, tool_name: str, arguments: Dict[str, Any], error: Exception
+    ) -> str:
+        """
+        Format a safe, natural-language user-facing response for tool execution failures,
+        without exposing internal host filesystem paths or secrets.
+        """
+        err_str = str(error)
+        err_type = type(error).__name__
+
+        # 1. FileTool sandbox violations
+        if "SandboxViolationError" in err_type or "outside the sandbox" in err_str:
+            op = arguments.get("operation", "access")
+            if op == "read":
+                return "I couldn't read that file because the requested path is outside the controlled file sandbox."
+            elif op == "write":
+                return "I couldn't write to that file because the requested path is outside the controlled file sandbox."
+            elif op == "list":
+                return "I couldn't list that directory because the requested path is outside the controlled file sandbox."
+            return "I couldn't perform that file operation because the requested path is outside the controlled file sandbox."
+
+        # 2. FileTool file not found
+        if "FileNotFoundError" in err_type or "File or directory not found" in err_str:
+            target = arguments.get("path", "file")
+            return f"I couldn't find the requested file or directory '{target}' in the controlled file sandbox."
+
+        # 3. FileTool size limit
+        if "FileSizeLimitExceededError" in err_type or ("exceeds" in err_str.lower() and "size" in err_str.lower()):
+            return "The requested file operation could not be completed because it exceeds the allowed size limit."
+
+        # 4. Calculator errors (e.g. division by zero)
+        if tool_name == "calculator" and ("Division by zero" in err_str or "ZeroDivisionError" in err_type):
+            return "I couldn't complete the calculation because division by zero is not allowed."
+
+        # 5. CommandTool errors (e.g. timeout, command not allowed)
+        if tool_name == "command_tool":
+            if "timed out" in err_str.lower():
+                return "The command execution timed out."
+            if "not allowed" in err_str.lower():
+                cmd = arguments.get("command", "")
+                return f"The command '{cmd}' is not in the allowlist of permitted commands."
+
+        # 6. DatabaseTool errors
+        if tool_name == "database_tool":
+            if "Destructive SQL" in err_str or "blocked" in err_str.lower():
+                return "The database operation was blocked because only safe, non-destructive queries are permitted."
+
+        # 7. HTTPTool errors
+        if tool_name == "http_tool":
+            if "External network access is blocked" in err_str:
+                return "The HTTP request was blocked because external network access is not permitted."
+
+        # General fallback: return a concise natural language explanation
+        clean_msg = err_str.split("\n")[0].strip()
+        return f"I encountered an error while executing '{tool_name}': {clean_msg}."
+
     def send_message(
         self,
         user_input: str,
@@ -319,6 +381,13 @@ class ToolUsingAgent:
                         error=decision.reason,
                         security_event="authorization_denied",
                     )
+                    final_resp = self._format_authorization_denied_response(tool_call.tool_name, decision.reason)
+                    self._emit_event(
+                        session_id=sid,
+                        event_type="final_response",
+                        agent_state="completed",
+                        final_response=final_resp,
+                    )
                     return AgentResult(
                         session_id=sid,
                         tool_call=tool_call,
@@ -329,6 +398,7 @@ class ToolUsingAgent:
                         authorization_reason=decision.reason,
                         tool_executed=False,
                         error=f"Authorization denied for tool '{tool_call.tool_name}': {decision.reason}",
+                        final_response=final_resp,
                     )
 
             try:
@@ -384,6 +454,13 @@ class ToolUsingAgent:
                     error=e.reason,
                     security_event="authorization_denied",
                 )
+                final_resp = self._format_authorization_denied_response(tool_call.tool_name, e.reason)
+                self._emit_event(
+                    session_id=sid,
+                    event_type="final_response",
+                    agent_state="completed",
+                    final_response=final_resp,
+                )
                 return AgentResult(
                     session_id=sid,
                     tool_call=tool_call,
@@ -394,6 +471,7 @@ class ToolUsingAgent:
                     authorization_reason=e.reason,
                     tool_executed=False,
                     error=str(e),
+                    final_response=final_resp,
                 )
             except ToolNotFoundError as e:
                 error_msg = f"Tool '{tool_call.tool_name}' not found: {str(e)}"
@@ -404,6 +482,13 @@ class ToolUsingAgent:
                     tool_call=tool_call.tool_name,
                     error=error_msg,
                 )
+                final_resp = f"I couldn't execute the requested tool because '{tool_call.tool_name}' was not found."
+                self._emit_event(
+                    session_id=sid,
+                    event_type="final_response",
+                    agent_state="completed",
+                    final_response=final_resp,
+                )
                 return AgentResult(
                     session_id=sid,
                     tool_call=tool_call,
@@ -414,6 +499,7 @@ class ToolUsingAgent:
                     authorization_reason=auth_reason,
                     tool_executed=False,
                     error=error_msg,
+                    final_response=final_resp,
                 )
             except Exception as e:
                 error_msg = f"Tool execution failed: {str(e)}"
@@ -424,6 +510,15 @@ class ToolUsingAgent:
                     tool_call=tool_call.tool_name,
                     error=error_msg,
                 )
+                final_resp = self._format_execution_error_response(
+                    tool_call.tool_name, tool_call.arguments, e
+                )
+                self._emit_event(
+                    session_id=sid,
+                    event_type="final_response",
+                    agent_state="completed",
+                    final_response=final_resp,
+                )
                 return AgentResult(
                     session_id=sid,
                     tool_call=tool_call,
@@ -434,6 +529,7 @@ class ToolUsingAgent:
                     authorization_reason=auth_reason,
                     tool_executed=False,
                     error=error_msg,
+                    final_response=final_resp,
                 )
 
         return AgentResult(
