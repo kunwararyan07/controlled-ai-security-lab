@@ -158,6 +158,22 @@ class TestPromptConstruction(unittest.TestCase):
         empty_builder = PromptBuilder(tool_registry=None)
         self.assertEqual(empty_builder.build_initial_prompt("Hello"), "Hello")
 
+    def test_calculator_prompt_forbids_expression_and_requires_operation_a_b(self) -> None:
+        """6. Prompt explicitly requires operation, a, b and forbids expression."""
+        initial = self.builder.build_initial_prompt("Multiply 25 by 4")
+        self.assertIn("MUST NOT use an 'expression' field", initial)
+        self.assertIn('{"operation": "multiply", "a": 25, "b": 4}', initial)
+        self.assertIn("never use an 'expression' field", initial)
+
+        feedback = self.builder.build_feedback_prompt(
+            user_input="Multiply 25 by 4",
+            tool_name="calculator",
+            tool_arguments={"operation": "multiply", "a": 25, "b": 4},
+            tool_result=100,
+        )
+        self.assertIn("never use 'expression'", feedback)
+        self.assertIn("Available tools:", feedback)
+
 
 class TestParserHardening(unittest.TestCase):
     """Tests for ToolUsingAgent response parser hardening."""

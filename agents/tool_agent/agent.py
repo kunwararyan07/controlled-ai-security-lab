@@ -461,6 +461,8 @@ class ToolUsingAgent:
                     tool_name=tool_call.tool_name,
                     tool_arguments=tool_call.arguments,
                     tool_result=result,
+                    tool_calls=executed_tool_calls,
+                    tool_results=executed_tool_results,
                 )
 
             except AuthorizationDeniedError as e:

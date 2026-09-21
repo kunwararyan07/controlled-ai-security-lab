@@ -1317,7 +1317,121 @@ class TestKASUserFacingBehavior(unittest.TestCase):
         self.assertEqual(res_d.tool_call, tc1)
         self.assertIsNone(res_d.tool_result)
         self.assertEqual(res_d.tool_calls, [tc1])
-        self.assertEqual(res_d.tool_results, [])
+    def test_multistep_distinguishes_model_duplicate_from_agent_double_execution(self) -> None:
+        """Regression 15: Distinguish model-generated duplicate tool call from agent accidental double-execution."""
+        class TrackingModel(MockModel):
+            def __init__(self, responses: List[str]):
+                super().__init__(responses=responses)
+                self.prompts_received: List[str] = []
+
+            def generate(self, prompt: str) -> str:
+                self.prompts_received.append(prompt)
+                return super().generate(prompt)
+
+        # Scenario A: Model explicitly emits a duplicate tool call on step 3
+        responses_with_duplicate = [
+            json.dumps({
+                "type": "tool_call",
+                "tool": "database_tool",
+                "arguments": {"operation": "query", "query": "SELECT 1 AS val"},
+            }),
+            json.dumps({
+                "type": "tool_call",
+                "tool": "calculator",
+                "arguments": {"operation": "multiply", "a": 25, "b": 4},
+            }),
+            json.dumps({
+                "type": "tool_call",
+                "tool": "calculator",
+                "arguments": {"operation": "multiply", "a": 25, "b": 4},
+            }),
+        ]
+        model_a = TrackingModel(responses=responses_with_duplicate)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["database_tool", "calculator"])
+        collector_a = EventCollector()
+        agent_a = ToolUsingAgent(
+            model=model_a,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector_a,
+            max_steps=3,
+        )
+
+        res_a = agent_a.send_message("Query then multiply", session_id="distinguish-dup-1")
+
+        # Agent invoked model.generate 3 distinct times (1:1 correspondence)
+        self.assertEqual(len(model_a.prompts_received), 3)
+        self.assertEqual(len(res_a.tool_calls), 3)
+        self.assertEqual(len(res_a.tool_results), 3)
+        # Each execution matches exactly one model response
+        self.assertEqual(res_a.tool_calls[0].tool_name, "database_tool")
+        self.assertEqual(res_a.tool_calls[1].tool_name, "calculator")
+        self.assertEqual(res_a.tool_calls[2].tool_name, "calculator")
+
+        # Scenario B: Model emits final response after step 2 (intended flow)
+        responses_with_final = [
+            json.dumps({
+                "type": "tool_call",
+                "tool": "database_tool",
+                "arguments": {"operation": "query", "query": "SELECT 1 AS val"},
+            }),
+            json.dumps({
+                "type": "tool_call",
+                "tool": "calculator",
+                "arguments": {"operation": "multiply", "a": 25, "b": 4},
+            }),
+            json.dumps({
+                "type": "final",
+                "response": "Database returned 1 and 25 * 4 = 100.",
+            }),
+        ]
+        model_b = TrackingModel(responses=responses_with_final)
+        collector_b = EventCollector()
+        agent_b = ToolUsingAgent(
+            model=model_b,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector_b,
+            max_steps=3,
+        )
+
+        res_b = agent_b.send_message("Query then multiply", session_id="distinguish-dup-2")
+
+        # Exactly 3 model calls (2 tool calls + 1 final response)
+        self.assertEqual(len(model_b.prompts_received), 3)
+        # Exactly 2 tool executions, no duplicate 3rd call
+        self.assertEqual(len(res_b.tool_calls), 2)
+        self.assertEqual(len(res_b.tool_results), 2)
+        self.assertEqual(res_b.final_response, "Database returned 1 and 25 * 4 = 100.")
+        self.assertEqual(res_b.tool_calls[0].tool_name, "database_tool")
+        self.assertEqual(res_b.tool_calls[1].tool_name, "calculator")
+
+    def test_feedback_prompt_accumulates_execution_history_and_instructs_no_duplicate(self) -> None:
+        """Regression 16: Feedback prompt includes full multi-step history and anti-repetition guidance."""
+        builder = PromptBuilder(tool_registry=self.registry)
+        tc1 = ToolCall(tool_name="database_tool", arguments={"operation": "query", "query": "SELECT 1"})
+        tc2 = ToolCall(tool_name="calculator", arguments={"operation": "multiply", "a": 25, "b": 4})
+
+        # Single step feedback
+        single_feedback = builder.build_feedback_prompt(
+            user_input="Run query and multiply",
+            tool_name="database_tool",
+            tool_arguments={"operation": "query", "query": "SELECT 1"},
+            tool_result={"rows": [[1]]},
+        )
+        self.assertIn("PREVIOUS TOOL EXECUTION:\n- Tool: database_tool", single_feedback)
+
+        # Multi-step feedback
+        multi_feedback = builder.build_feedback_prompt(
+            user_input="Run query and multiply",
+            tool_calls=[tc1, tc2],
+            tool_results=[{"rows": [[1]]}, 100],
+        )
+        self.assertIn("PREVIOUS TOOL EXECUTION HISTORY:", multi_feedback)
+        self.assertIn("Step 1:\n- Tool: database_tool", multi_feedback)
+        self.assertIn("Step 2:\n- Tool: calculator", multi_feedback)
+        self.assertIn("NEVER repeat or re-execute any tool call that already appears in the execution history.", multi_feedback)
+        self.assertIn("If all operations requested by the user are now complete, you MUST choose Format 2 (final)", multi_feedback)
 
 
 if __name__ == "__main__":

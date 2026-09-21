@@ -37,8 +37,18 @@ class CalculatorTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Performs basic arithmetic operations (add, subtract, multiply, divide) "
-            "using structured numeric inputs."
+            "Performs basic arithmetic operations using structured numeric inputs (operation, a, b). "
+            "'operation' is required. Allowed operation names are exactly: add, subtract, multiply, divide. "
+            "'a' is required and must be numeric. 'b' is required and must be numeric. "
+            "The model MUST NOT use an 'expression' field and must not invent alternate formats "
+            'such as {"expression":"25 * 4"}. '
+            "The calculator interface is operation/a/b and all arithmetic expressions must be converted "
+            "into that structure. "
+            "Examples: "
+            'Addition: {"operation":"add","a":10,"b":5}; '
+            'Subtraction: {"operation":"subtract","a":10,"b":5}; '
+            'Multiplication: {"operation":"multiply","a":25,"b":4}; '
+            'Division: {"operation":"divide","a":20,"b":5}.'
         )
 
     @property
@@ -49,15 +59,18 @@ class CalculatorTool(Tool):
                 "operation": {
                     "type": "string",
                     "enum": ["add", "subtract", "multiply", "divide"],
-                    "description": "The arithmetic operation to perform.",
+                    "description": (
+                        "The arithmetic operation to perform. Required. "
+                        "Allowed operation names are exactly: add, subtract, multiply, divide."
+                    ),
                 },
                 "a": {
                     "type": "number",
-                    "description": "The first operand.",
+                    "description": "The first operand. Required and must be numeric.",
                 },
                 "b": {
                     "type": "number",
-                    "description": "The second operand.",
+                    "description": "The second operand. Required and must be numeric.",
                 },
             },
             "required": ["operation", "a", "b"],
