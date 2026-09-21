@@ -35,8 +35,13 @@ class AgentResult:
     def __post_init__(self) -> None:
         if self.tool_call is not None and not self.tool_calls:
             self.tool_calls = [self.tool_call]
+        elif self.tool_call is None and self.tool_calls:
+            self.tool_call = self.tool_calls[-1]
+
         if self.tool_result is not None and not self.tool_results:
             self.tool_results = [self.tool_result]
+        elif self.tool_result is None and self.tool_results:
+            self.tool_result = self.tool_results[-1]
 
     @property
     def tool_requested(self) -> bool:

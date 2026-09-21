@@ -279,6 +279,7 @@ class ToolUsingAgent:
                     tool_executed=len(executed_tool_results) > 0,
                     authorization_allowed=last_auth_allowed,
                     authorization_reason=last_auth_reason,
+                    tool_result=executed_tool_results[-1] if executed_tool_results else None,
                 )
 
             # Handle tool call
@@ -443,6 +444,7 @@ class ToolUsingAgent:
             tool_executed=len(executed_tool_results) > 0,
             authorization_allowed=last_auth_allowed,
             authorization_reason=last_auth_reason,
+            tool_result=executed_tool_results[-1] if executed_tool_results else None,
             final_response=str(executed_tool_results[-1]) if executed_tool_results else None,
         )
 
