@@ -123,6 +123,19 @@ def format_agent_result(result: AgentResult, classifier: SecurityClassifier) -> 
     # 5. Security classification
     sec_result = classifier.classify_agent_result(result)
     lines.append(f"  Security Status:        {sec_result.status.value} - {sec_result.reason}")
+
+    # 6. Timing metrics (if available)
+    if result.total_duration is not None or result.model_durations:
+        lines.append("")
+        lines.append("  Timing Details:")
+        if result.total_duration is not None:
+            lines.append(f"    Total Interaction:    {result.total_duration:.3f}s")
+        for idx, md in enumerate(result.model_durations, 1):
+            lines.append(f"    Model Generation #{idx}: {md:.3f}s")
+        for idx, td in enumerate(result.tool_durations, 1):
+            tool_name = result.tool_calls[idx - 1].tool_name if idx - 1 < len(result.tool_calls) else f"Tool #{idx}"
+            lines.append(f"    {tool_name} Execution: {td:.3f}s")
+
     lines.append("─" * 60)
     lines.append("")
     return "\n".join(lines)
@@ -176,6 +189,8 @@ Available KAS Commands:
                     payload_info = f" | Tool: {e.tool_call}"
                 elif e.error:
                     payload_info = f" | Error: {e.error}"
+                if e.duration_seconds is not None:
+                    payload_info += f" | Duration: {e.duration_seconds:.3f}s"
                 print(f"[{i}] {e.timestamp} | Type: {e.event_type} | State: {e.agent_state}{payload_info}")
             print("----------------------------------\n")
         return True
@@ -204,7 +219,7 @@ DEFAULT_KAS_MODEL_OPTIONS: Dict[str, Any] = {
 def setup_agent(
     model_name: str = "gemma2:2b",
     base_url: str = "http://127.0.0.1:11434",
-    timeout: float = 60.0,
+    timeout: float = 120.0,
     model_adapter: Optional[ModelAdapter] = None,
     allowed_tools: Optional[List[str]] = None,
     max_steps: int = 3,
@@ -293,8 +308,8 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--timeout",
         type=float,
-        default=60.0,
-        help="Model request timeout in seconds (default: 60.0)",
+        default=120.0,
+        help="Model request timeout in seconds (default: 120.0)",
     )
     parser.add_argument(
         "--max-steps",

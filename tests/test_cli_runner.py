@@ -46,7 +46,7 @@ class TestKASCLIRunner(unittest.TestCase):
         args = parse_args([])
         self.assertEqual(args.model, "gemma2:2b")
         self.assertEqual(args.endpoint, "http://127.0.0.1:11434")
-        self.assertEqual(args.timeout, 60.0)
+        self.assertEqual(args.timeout, 120.0)
         self.assertEqual(args.max_steps, 3)
         self.assertIsNone(args.session_id)
 
@@ -64,6 +64,23 @@ class TestKASCLIRunner(unittest.TestCase):
         self.assertEqual(args.timeout, 45.0)
         self.assertEqual(args.max_steps, 5)
         self.assertEqual(args.session_id, "test-sess-001")
+
+    def test_parse_args_timeout_override(self) -> None:
+        """2b. Argument parser allows explicitly overriding timeout."""
+        args_60 = parse_args(["--timeout", "60.0"])
+        self.assertEqual(args_60.timeout, 60.0)
+
+        args_180 = parse_args(["--timeout", "180"])
+        self.assertEqual(args_180.timeout, 180.0)
+
+    def test_parse_args_help_text_contains_default_120(self) -> None:
+        """2c. CLI help text documents default: 120.0."""
+        from io import StringIO
+        captured = StringIO()
+        with patch("sys.stdout", captured):
+            with self.assertRaises(SystemExit):
+                parse_args(["--help"])
+        self.assertIn("default: 120.0", captured.getvalue())
 
     def test_banner_formatting(self) -> None:
         """3. Banner prominently features KAS TOOL_CALLING AGENT."""
@@ -224,6 +241,12 @@ class TestKASCLIRunner(unittest.TestCase):
         finally:
             if mock_server is not None:
                 mock_server.stop()
+
+    def test_setup_agent_default_timeout(self) -> None:
+        """14. setup_agent defaults to 120.0s timeout."""
+        import inspect
+        sig = inspect.signature(setup_agent)
+        self.assertEqual(sig.parameters["timeout"].default, 120.0)
 
 
 if __name__ == "__main__":

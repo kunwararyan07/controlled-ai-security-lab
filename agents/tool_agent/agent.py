@@ -1,4 +1,5 @@
 import json
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -266,6 +267,7 @@ class ToolUsingAgent:
             An AgentResult detailing final response, tool execution(s), or authorization denial.
         """
         sid = session_id or uuid.uuid4().hex[:12]
+        start_time = time.monotonic()
         effective_max_steps = max_steps if max_steps is not None else self.max_steps
         if effective_max_steps < 1:
             effective_max_steps = 1
@@ -281,6 +283,8 @@ class ToolUsingAgent:
         current_prompt = prompt_builder.build_initial_prompt(user_input)
         executed_tool_calls: List[ToolCall] = []
         executed_tool_results: List[Any] = []
+        model_durations: List[float] = []
+        tool_durations: List[float] = []
         last_tool_call: Optional[ToolCall] = None
         last_auth_allowed: bool = False
         last_auth_reason: Optional[str] = None
@@ -289,15 +293,22 @@ class ToolUsingAgent:
         while step < effective_max_steps:
             step += 1
 
+            t_gen_start = time.monotonic()
             try:
                 raw_response = self.model.generate(current_prompt)
+                gen_duration = time.monotonic() - t_gen_start
+                model_durations.append(gen_duration)
             except Exception as e:
+                gen_duration = time.monotonic() - t_gen_start
+                model_durations.append(gen_duration)
+                total_duration = time.monotonic() - start_time
                 error_msg = f"Model error: {str(e)}"
                 self._emit_event(
                     session_id=sid,
                     event_type="error",
                     agent_state="error",
                     error=error_msg,
+                    duration_seconds=gen_duration,
                 )
                 return AgentResult(
                     session_id=sid,
@@ -306,6 +317,9 @@ class ToolUsingAgent:
                     tool_results=executed_tool_results,
                     tool_executed=len(executed_tool_results) > 0,
                     error=error_msg,
+                    model_durations=model_durations,
+                    tool_durations=tool_durations,
+                    total_duration=total_duration,
                 )
 
             self._emit_event(
@@ -313,11 +327,13 @@ class ToolUsingAgent:
                 event_type="model_response",
                 agent_state="model_responded",
                 final_response=raw_response,
+                duration_seconds=gen_duration,
             )
 
             try:
                 resp_type, parsed = self._parse_response(raw_response)
             except Exception as e:
+                total_duration = time.monotonic() - start_time
                 error_msg = f"Parse error: {str(e)}"
                 self._emit_event(
                     session_id=sid,
@@ -331,6 +347,7 @@ class ToolUsingAgent:
                     event_type="final_response",
                     agent_state="completed",
                     final_response=final_resp,
+                    duration_seconds=total_duration,
                 )
                 return AgentResult(
                     session_id=sid,
@@ -340,14 +357,19 @@ class ToolUsingAgent:
                     tool_executed=len(executed_tool_results) > 0,
                     error=error_msg,
                     final_response=final_resp,
+                    model_durations=model_durations,
+                    tool_durations=tool_durations,
+                    total_duration=total_duration,
                 )
 
             if resp_type == "final":
+                total_duration = time.monotonic() - start_time
                 self._emit_event(
                     session_id=sid,
                     event_type="final_response",
                     agent_state="completed",
                     final_response=parsed,
+                    duration_seconds=total_duration,
                 )
                 return AgentResult(
                     session_id=sid,
@@ -359,6 +381,9 @@ class ToolUsingAgent:
                     authorization_allowed=last_auth_allowed,
                     authorization_reason=last_auth_reason,
                     tool_result=executed_tool_results[-1] if executed_tool_results else None,
+                    model_durations=model_durations,
+                    tool_durations=tool_durations,
+                    total_duration=total_duration,
                 )
 
             # Handle tool call
@@ -390,6 +415,7 @@ class ToolUsingAgent:
                     authorization_decision=decision.to_dict(),
                 )
                 if not decision.allowed:
+                    total_duration = time.monotonic() - start_time
                     self._emit_event(
                         session_id=sid,
                         event_type="authorization_denied",
@@ -404,6 +430,7 @@ class ToolUsingAgent:
                         event_type="final_response",
                         agent_state="completed",
                         final_response=final_resp,
+                        duration_seconds=total_duration,
                     )
                     return AgentResult(
                         session_id=sid,
@@ -417,14 +444,20 @@ class ToolUsingAgent:
                         tool_result=None,
                         error=f"Authorization denied for tool '{tool_call.tool_name}': {decision.reason}",
                         final_response=final_resp,
+                        model_durations=model_durations,
+                        tool_durations=tool_durations,
+                        total_duration=total_duration,
                     )
 
+            t_tool_start = time.monotonic()
             try:
                 result = self.tool_registry.execute(
                     name=tool_call.tool_name,
                     args=tool_call.arguments,
                     authorization_policy=self.authorization_policy,
                 )
+                tool_duration = time.monotonic() - t_tool_start
+                tool_durations.append(tool_duration)
                 executed_tool_calls.append(tool_call)
                 executed_tool_results.append(result)
                 self._emit_event(
@@ -434,14 +467,17 @@ class ToolUsingAgent:
                     tool_call=tool_call.tool_name,
                     tool_result=result,
                     execution_result=result,
+                    duration_seconds=tool_duration,
                 )
 
                 if step >= effective_max_steps:
+                    total_duration = time.monotonic() - start_time
                     self._emit_event(
                         session_id=sid,
                         event_type="final_response",
                         agent_state="completed",
                         final_response=str(result),
+                        duration_seconds=total_duration,
                     )
                     return AgentResult(
                         session_id=sid,
@@ -454,6 +490,9 @@ class ToolUsingAgent:
                         tool_executed=True,
                         tool_result=result,
                         final_response=str(result),
+                        model_durations=model_durations,
+                        tool_durations=tool_durations,
+                        total_duration=total_duration,
                     )
 
                 current_prompt = prompt_builder.build_feedback_prompt(
@@ -466,6 +505,9 @@ class ToolUsingAgent:
                 )
 
             except AuthorizationDeniedError as e:
+                tool_duration = time.monotonic() - t_tool_start
+                tool_durations.append(tool_duration)
+                total_duration = time.monotonic() - start_time
                 self._emit_event(
                     session_id=sid,
                     event_type="authorization_denied",
@@ -473,6 +515,7 @@ class ToolUsingAgent:
                     tool_call=tool_call.tool_name,
                     error=e.reason,
                     security_event="authorization_denied",
+                    duration_seconds=tool_duration,
                 )
                 final_resp = self._format_authorization_denied_response(tool_call.tool_name, e.reason)
                 self._emit_event(
@@ -480,6 +523,7 @@ class ToolUsingAgent:
                     event_type="final_response",
                     agent_state="completed",
                     final_response=final_resp,
+                    duration_seconds=total_duration,
                 )
                 return AgentResult(
                     session_id=sid,
@@ -493,8 +537,14 @@ class ToolUsingAgent:
                     tool_result=None,
                     error=str(e),
                     final_response=final_resp,
+                    model_durations=model_durations,
+                    tool_durations=tool_durations,
+                    total_duration=total_duration,
                 )
             except ToolNotFoundError as e:
+                tool_duration = time.monotonic() - t_tool_start
+                tool_durations.append(tool_duration)
+                total_duration = time.monotonic() - start_time
                 error_msg = f"Tool '{tool_call.tool_name}' not found: {str(e)}"
                 self._emit_event(
                     session_id=sid,
@@ -502,6 +552,7 @@ class ToolUsingAgent:
                     agent_state="error",
                     tool_call=tool_call.tool_name,
                     error=error_msg,
+                    duration_seconds=tool_duration,
                 )
                 final_resp = f"I couldn't execute the requested tool because '{tool_call.tool_name}' was not found."
                 self._emit_event(
@@ -509,6 +560,7 @@ class ToolUsingAgent:
                     event_type="final_response",
                     agent_state="completed",
                     final_response=final_resp,
+                    duration_seconds=total_duration,
                 )
                 return AgentResult(
                     session_id=sid,
@@ -522,8 +574,14 @@ class ToolUsingAgent:
                     tool_result=None,
                     error=error_msg,
                     final_response=final_resp,
+                    model_durations=model_durations,
+                    tool_durations=tool_durations,
+                    total_duration=total_duration,
                 )
             except Exception as e:
+                tool_duration = time.monotonic() - t_tool_start
+                tool_durations.append(tool_duration)
+                total_duration = time.monotonic() - start_time
                 error_msg = f"Tool execution failed: {str(e)}"
                 self._emit_event(
                     session_id=sid,
@@ -531,6 +589,7 @@ class ToolUsingAgent:
                     agent_state="error",
                     tool_call=tool_call.tool_name,
                     error=error_msg,
+                    duration_seconds=tool_duration,
                 )
                 final_resp = self._format_execution_error_response(
                     tool_call.tool_name, tool_call.arguments, e
@@ -540,6 +599,7 @@ class ToolUsingAgent:
                     event_type="final_response",
                     agent_state="completed",
                     final_response=final_resp,
+                    duration_seconds=total_duration,
                 )
                 return AgentResult(
                     session_id=sid,
@@ -553,8 +613,12 @@ class ToolUsingAgent:
                     tool_result=None,
                     error=error_msg,
                     final_response=final_resp,
+                    model_durations=model_durations,
+                    tool_durations=tool_durations,
+                    total_duration=total_duration,
                 )
 
+        total_duration = time.monotonic() - start_time
         return AgentResult(
             session_id=sid,
             tool_call=last_tool_call,
@@ -565,6 +629,9 @@ class ToolUsingAgent:
             authorization_reason=last_auth_reason,
             tool_result=executed_tool_results[-1] if executed_tool_results else None,
             final_response=str(executed_tool_results[-1]) if executed_tool_results else None,
+            model_durations=model_durations,
+            tool_durations=tool_durations,
+            total_duration=total_duration,
         )
 
 

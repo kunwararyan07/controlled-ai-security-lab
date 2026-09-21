@@ -1433,6 +1433,125 @@ class TestKASUserFacingBehavior(unittest.TestCase):
         self.assertIn("NEVER repeat or re-execute any tool call that already appears in the execution history.", multi_feedback)
         self.assertIn("If all operations requested by the user are now complete, you MUST choose Format 2 (final)", multi_feedback)
 
+    def test_timing_is_recorded_for_single_model_generation(self) -> None:
+        """Regression 17: Timing instrumentation records model generation, tool execution, and total duration."""
+        model_payload = json.dumps({
+            "type": "final",
+            "response": "I am KAS, your controlled assistant.",
+        })
+        model = MockModel(response=model_payload)
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            event_collector=collector,
+        )
+
+        result = agent.send_message("Who are you?", session_id="timing-sess-1")
+
+        # 1. Non-negative timing recorded on AgentResult
+        self.assertEqual(len(result.model_durations), 1)
+        self.assertGreaterEqual(result.model_durations[0], 0.0)
+        self.assertIsNotNone(result.total_duration)
+        self.assertGreaterEqual(result.total_duration, result.model_durations[0])
+
+        # 2. Timing recorded in observability events
+        events = collector.get_events(session_id="timing-sess-1")
+        model_events = [e for e in events if e.event_type == "model_response"]
+        final_events = [e for e in events if e.event_type == "final_response"]
+
+        self.assertEqual(len(model_events), 1)
+        self.assertIsNotNone(model_events[0].duration_seconds)
+        self.assertEqual(model_events[0].duration_seconds, result.model_durations[0])
+        self.assertGreaterEqual(model_events[0].duration_seconds, 0.0)
+
+        self.assertEqual(len(final_events), 1)
+        self.assertIsNotNone(final_events[0].duration_seconds)
+        self.assertEqual(final_events[0].duration_seconds, result.total_duration)
+
+    def test_timing_records_multiple_model_generations_separately(self) -> None:
+        """Regression 18: Multiple model.generate() invocations produce separate timing records."""
+        responses = [
+            json.dumps({
+                "type": "tool_call",
+                "tool": "calculator",
+                "arguments": {"operation": "multiply", "a": 25, "b": 4},
+            }),
+            json.dumps({
+                "type": "final",
+                "response": "25 * 4 = 100",
+            }),
+        ]
+        model = MockModel(responses=responses)
+        policy = AllowlistAuthorizationPolicy(allowed_tools=["calculator"])
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=model,
+            tool_registry=self.registry,
+            authorization_policy=policy,
+            event_collector=collector,
+            max_steps=3,
+        )
+
+        result = agent.send_message("Multiply 25 by 4", session_id="timing-multi-1")
+
+        # 1. Exactly 2 model generations recorded separately
+        self.assertEqual(len(result.model_durations), 2)
+        self.assertTrue(all(d >= 0.0 for d in result.model_durations))
+
+        # 2. Exactly 1 tool execution recorded
+        self.assertEqual(len(result.tool_durations), 1)
+        self.assertGreaterEqual(result.tool_durations[0], 0.0)
+
+        # 3. Total duration covers model + tool
+        self.assertIsNotNone(result.total_duration)
+        self.assertGreaterEqual(result.total_duration, 0.0)
+
+        # 4. Observability events contain separate durations
+        events = collector.get_events(session_id="timing-multi-1")
+        model_events = [e for e in events if e.event_type == "model_response"]
+        tool_events = [e for e in events if e.event_type == "tool_execution"]
+
+        self.assertEqual(len(model_events), 2)
+        self.assertEqual(model_events[0].duration_seconds, result.model_durations[0])
+        self.assertEqual(model_events[1].duration_seconds, result.model_durations[1])
+
+        self.assertEqual(len(tool_events), 1)
+        self.assertEqual(tool_events[0].duration_seconds, result.tool_durations[0])
+
+        # 5. Agent behavior unchanged
+        self.assertTrue(result.tool_executed)
+        self.assertEqual(result.tool_result, 100)
+        self.assertEqual(result.final_response, "25 * 4 = 100")
+
+    def test_timing_recorded_on_model_error(self) -> None:
+        """Regression 19: Timing is recorded even when model.generate() raises an exception."""
+        class FailingModel:
+            def generate(self, prompt: str) -> str:
+                import time
+                time.sleep(0.01)
+                raise TimeoutError("Model timed out after 60s")
+
+        collector = EventCollector()
+        agent = ToolUsingAgent(
+            model=FailingModel(),
+            tool_registry=self.registry,
+            event_collector=collector,
+        )
+
+        result = agent.send_message("Hello", session_id="timing-err-1")
+
+        self.assertIn("Model error:", result.error)
+        self.assertEqual(len(result.model_durations), 1)
+        self.assertGreaterEqual(result.model_durations[0], 0.005)
+        self.assertIsNotNone(result.total_duration)
+
+        events = collector.get_events(session_id="timing-err-1")
+        err_events = [e for e in events if e.event_type == "error"]
+        self.assertEqual(len(err_events), 1)
+        self.assertIsNotNone(err_events[0].duration_seconds)
+        self.assertGreaterEqual(err_events[0].duration_seconds, 0.005)
+
 
 if __name__ == "__main__":
     unittest.main()

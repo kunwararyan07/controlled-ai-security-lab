@@ -31,6 +31,9 @@ class AgentResult:
     error: Optional[str] = None
     tool_calls: list = field(default_factory=list)
     tool_results: list = field(default_factory=list)
+    model_durations: list = field(default_factory=list)
+    tool_durations: list = field(default_factory=list)
+    total_duration: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.tool_call is not None and not self.tool_calls:
@@ -71,4 +74,7 @@ class AgentResult:
             "tool_result": self.tool_result,
             "tool_results": self.tool_results,
             "error": self.error,
+            "model_durations": self.model_durations,
+            "tool_durations": self.tool_durations,
+            "total_duration": self.total_duration,
         }

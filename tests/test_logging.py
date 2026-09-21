@@ -65,6 +65,14 @@ class TestLogging(unittest.TestCase):
         with self.assertRaises(TypeError):
             collector.record("not an event")  # type: ignore
 
+    def test_event_duration_seconds(self):
+        event = Event(user_input="hello", duration_seconds=1.234)
+        self.assertEqual(event.duration_seconds, 1.234)
+        data_full = event.to_dict(include_none=True)
+        self.assertEqual(data_full["duration_seconds"], 1.234)
+        data_compact = event.to_dict(include_none=False)
+        self.assertEqual(data_compact["duration_seconds"], 1.234)
+
 
 if __name__ == "__main__":
     unittest.main()
