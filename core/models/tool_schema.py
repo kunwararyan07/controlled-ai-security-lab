@@ -167,7 +167,7 @@ class PromptBuilder:
             "}\n\n"
             "CRITICAL RULES:\n"
             "1. Respond with ONLY the JSON object. Do NOT include markdown code blocks, conversational filler, or explanations before or after the JSON.\n"
-            "2. Use a tool only when necessary. For ordinary conversational questions or simple questions that do not require tools (such as 'Who are you?' or 'What is 2 + 6?'), respond directly with Format 2 (final) in clear natural language.\n"
+            "2. Use a tool only when necessary. For ordinary conversational questions (such as 'Who are you?'), respond directly with Format 2 (final) in clear natural language. When arithmetic or calculation is requested, or when using a tool improves correctness, use the calculator tool.\n"
             "3. Never invent tool names or operations. Use only the tools and allowed operations listed above.\n"
             "4. Return exactly one tool call at a time.\n"
             "5. Return a final response when no tool is needed or when the task is complete. Always provide the final response in clear natural language unless the user explicitly requests raw JSON.\n\n"

@@ -188,6 +188,12 @@ Available KAS Commands:
         return True
 
 
+DEFAULT_KAS_MODEL_OPTIONS: Dict[str, Any] = {
+    "temperature": 0.0,
+    "num_predict": 256,
+}
+
+
 def setup_agent(
     model_name: str = "gemma2:2b",
     base_url: str = "http://127.0.0.1:11434",
@@ -196,6 +202,7 @@ def setup_agent(
     allowed_tools: Optional[List[str]] = None,
     max_steps: int = 3,
     workspace_root: Optional[str] = None,
+    options: Optional[Dict[str, Any]] = None,
 ) -> Tuple[ToolUsingAgent, SecurityClassifier, Optional[MockAPIServer]]:
     """
     Initialize and return ToolUsingAgent, SecurityClassifier, and optional MockAPIServer.
@@ -242,10 +249,12 @@ def setup_agent(
     classifier = SecurityClassifier()
 
     # Model adapter
+    model_options = options if options is not None else dict(DEFAULT_KAS_MODEL_OPTIONS)
     model = model_adapter or OllamaAdapter(
         model_name=model_name,
         base_url=base_url,
         timeout=timeout,
+        options=model_options,
     )
 
     agent = ToolUsingAgent(

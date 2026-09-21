@@ -20,17 +20,22 @@ from tools.calculator import CalculatorTool
 from tools.file_tool import FileTool
 
 
+from scripts.run_tool_agent import DEFAULT_KAS_MODEL_OPTIONS, setup_agent
+
+
 class TestKASUserFacingBehavior(unittest.TestCase):
     """
     Regression test suite for KAS user-facing behavior:
     1. "Who are you?" produces KAS identity rather than Gemma identity.
     2. Normal conversational response remains natural language.
-    3. "What is 2 + 6?" produces a natural-language answer.
-    4. Calculator tool execution can produce a natural-language final response.
-    5. FileTool execution can produce a natural-language final response.
-    6. Raw tool call and tool result remain available in observability.
-    7. Multi-step authorization remains enforced.
-    8. Explicit raw JSON request behavior.
+    3. The tool schema no longer explicitly tells the model that "What is 2 + 6?" should avoid Calculator.
+    4. The tool schema permits/recommends Calculator for arithmetic.
+    5. Deterministic KAS model configuration uses temperature=0.0 and num_predict=256.
+    6. Calculator tool execution can produce a natural-language final response.
+    7. FileTool execution can produce a natural-language final response.
+    8. Raw tool call and tool result remain available in observability.
+    9. Multi-step authorization remains enforced.
+    10. Explicit raw JSON request behavior.
     """
 
     def setUp(self) -> None:
@@ -63,6 +68,49 @@ class TestKASUserFacingBehavior(unittest.TestCase):
         self.assertIn("identify yourself as KAS", prompt)
         self.assertIn("powered by the Gemma2:2b model", prompt)
         self.assertIn("does not override any security policy", prompt)
+
+    def test_tool_schema_no_longer_contains_2_plus_6_avoidance(self) -> None:
+        """Tool schema no longer contains 'What is 2 + 6?' as an example to avoid using a tool."""
+        builder = PromptBuilder(tool_registry=self.registry)
+        prompt = builder.build_initial_prompt("Hello")
+
+        self.assertNotIn("What is 2 + 6?", prompt)
+        self.assertNotIn("2 + 6", prompt)
+
+    def test_tool_schema_permits_calculator_for_arithmetic(self) -> None:
+        """Tool schema explicitly permits/recommends using the calculator tool for arithmetic."""
+        builder = PromptBuilder(tool_registry=self.registry)
+        prompt = builder.build_initial_prompt("Calculate something")
+
+        self.assertIn(
+            "When arithmetic or calculation is requested, or when using a tool improves correctness, use the calculator tool.",
+            prompt,
+        )
+
+    def test_deterministic_kas_model_configuration(self) -> None:
+        """KAS model configuration uses temperature=0.0 and num_predict=256 by default."""
+        self.assertEqual(DEFAULT_KAS_MODEL_OPTIONS.get("temperature"), 0.0)
+        self.assertEqual(DEFAULT_KAS_MODEL_OPTIONS.get("num_predict"), 256)
+
+        agent, _, mock_server = setup_agent(workspace_root=self.temp_dir)
+        try:
+            self.assertIsNotNone(agent.model.options)
+            self.assertEqual(agent.model.options.get("temperature"), 0.0)
+            self.assertEqual(agent.model.options.get("num_predict"), 256)
+        finally:
+            if mock_server is not None:
+                mock_server.stop()
+
+    def test_kas_model_configuration_allows_override(self) -> None:
+        """KAS setup_agent allows explicit model options override where appropriate."""
+        custom_opts = {"temperature": 0.5, "num_predict": 512}
+        agent, _, mock_server = setup_agent(workspace_root=self.temp_dir, options=custom_opts)
+        try:
+            self.assertEqual(agent.model.options.get("temperature"), 0.5)
+            self.assertEqual(agent.model.options.get("num_predict"), 512)
+        finally:
+            if mock_server is not None:
+                mock_server.stop()
 
     def test_who_are_you_identifies_as_kas_not_gemma(self) -> None:
         """User asking 'Who are you?' produces KAS identity rather than Gemma identity."""
