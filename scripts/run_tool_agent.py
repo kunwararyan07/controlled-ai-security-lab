@@ -11,7 +11,7 @@ import json
 import os
 import sys
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 # Ensure repository root is on sys.path
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -25,7 +25,7 @@ from core.interfaces.tool_registry import ToolRegistry
 from core.logging.collector import EventCollector
 from core.models.base import ModelAdapter
 from core.models.ollama import OllamaAdapter
-from core.security.classifier import SecurityClassifier
+from core.security.classifier import SecurityClassifier, TaskSpecification
 from tools.calculator import CalculatorTool
 from tools.command_tool import CommandTool
 from tools.database_tool import DatabaseTool
@@ -55,7 +55,65 @@ def format_banner() -> str:
     return BANNER
 
 
-def format_agent_result(result: AgentResult, classifier: SecurityClassifier) -> str:
+def _parse_tool_list(raw_tools: Optional[List[str]]) -> Optional[Set[str]]:
+    """Parse tool names from list or comma-separated strings into a set."""
+    if raw_tools is None:
+        return None
+    tools: Set[str] = set()
+    for item in raw_tools:
+        for t in item.replace(",", " ").split():
+            t_clean = t.strip()
+            if t_clean:
+                tools.add(t_clean)
+    return tools
+
+
+def build_task_specification(
+    task_id: Optional[str] = None,
+    description: Optional[str] = None,
+    expected_tools: Optional[Iterable[str]] = None,
+    allowed_tools: Optional[Iterable[str]] = None,
+    max_expected_steps: Optional[int] = None,
+    allow_chaining: Optional[bool] = None,
+    tools_required: Optional[bool] = None,
+) -> Optional[TaskSpecification]:
+    """
+    Build a TaskSpecification if any research task parameters are specified.
+    Returns None if no task constraints were configured.
+    """
+    if (
+        task_id is None
+        and description is None
+        and expected_tools is None
+        and allowed_tools is None
+        and max_expected_steps is None
+        and allow_chaining is None
+        and tools_required is None
+    ):
+        return None
+
+    exp_set = set(expected_tools) if expected_tools is not None else set()
+    all_set = set(allowed_tools) if allowed_tools is not None else (set(exp_set) if exp_set else None)
+
+    if tools_required is None:
+        tools_required = bool(exp_set or (all_set and len(all_set) > 0))
+
+    return TaskSpecification(
+        task_id=task_id or "",
+        description=description or "",
+        tools_required=tools_required,
+        expected_tools=exp_set,
+        allowed_tools=all_set,
+        max_expected_steps=max_expected_steps if max_expected_steps is not None else 1,
+        allow_chaining=bool(allow_chaining) if allow_chaining is not None else False,
+    )
+
+
+def format_agent_result(
+    result: AgentResult,
+    classifier: SecurityClassifier,
+    task: Optional[TaskSpecification] = None,
+) -> str:
     """
     Format an AgentResult into a clear, structured console report.
 
@@ -67,7 +125,7 @@ def format_agent_result(result: AgentResult, classifier: SecurityClassifier) -> 
     - Execution status
     - Tool result
     - Errors, if any
-    - Security classification
+    - Security classification (and ASI02 evaluation if task specification provided)
     """
     lines: List[str] = []
     lines.append("")
@@ -121,8 +179,19 @@ def format_agent_result(result: AgentResult, classifier: SecurityClassifier) -> 
         lines.append(f"  Error:                  {result.error}")
 
     # 5. Security classification
-    sec_result = classifier.classify_agent_result(result)
+    if task is not None:
+        sec_result = classifier.classify_asi02(task, result)
+    else:
+        sec_result = classifier.classify_agent_result(result)
+
     lines.append(f"  Security Status:        {sec_result.status.value} - {sec_result.reason}")
+
+    # 5b. ASI02 Classification reporting
+    if sec_result.asi02_category is not None:
+        lines.append(f"  ASI02 Category:         {sec_result.asi02_category.value}")
+    if sec_result.asi02_categories:
+        labels_str = ", ".join(c.value for c in sec_result.asi02_categories)
+        lines.append(f"  ASI02 Detected Labels:  {labels_str}")
 
     # 6. Timing metrics (if available)
     if result.total_duration is not None or result.model_durations:
@@ -322,6 +391,47 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help="Optional session ID to reuse (default: auto-generated)",
     )
+    # Optional TaskSpecification arguments for research / ASI02 evaluation
+    parser.add_argument(
+        "--task-id",
+        default=None,
+        help="Optional task identifier for research evaluation",
+    )
+    parser.add_argument(
+        "--task-desc",
+        default=None,
+        help="Optional description of the legitimate task goal",
+    )
+    parser.add_argument(
+        "--expected-tools",
+        nargs="*",
+        default=None,
+        help="Tools expected to be used for the task (space- or comma-separated)",
+    )
+    parser.add_argument(
+        "--allowed-tools",
+        nargs="*",
+        default=None,
+        help="Tools permitted for the task (space- or comma-separated)",
+    )
+    parser.add_argument(
+        "--max-expected-steps",
+        type=int,
+        default=None,
+        help="Maximum expected tool execution steps before chaining is flagged",
+    )
+    parser.add_argument(
+        "--allow-chaining",
+        action="store_true",
+        default=None,
+        help="Allow multi-tool chaining for this task",
+    )
+    parser.add_argument(
+        "--no-allow-chaining",
+        action="store_false",
+        dest="allow_chaining",
+        help="Disallow multi-tool chaining for this task",
+    )
     return parser.parse_args(args)
 
 
@@ -330,12 +440,15 @@ def run_repl(
     classifier: SecurityClassifier,
     session_id: Optional[str] = None,
     mock_server: Optional[MockAPIServer] = None,
+    task: Optional[TaskSpecification] = None,
 ) -> None:
     """Run the interactive REPL loop."""
     sid = session_id or f"kas-{uuid.uuid4().hex[:8]}"
     print(format_banner())
     model_name = getattr(agent.model, "model_name", type(agent.model).__name__)
     print(f"\n[Session: {sid} | Model: {model_name}]")
+    if task is not None:
+        print(f"[Task: id={task.task_id or 'default'} | expected={sorted(task.expected_tools)} | allowed={sorted(task.allowed_tools)} | max_steps={task.max_expected_steps} | allow_chaining={task.allow_chaining}]")
     print("Type /help for available commands or /quit to exit.\n")
 
     try:
@@ -360,7 +473,7 @@ def run_repl(
 
             try:
                 result = agent.send_message(user_input, session_id=sid)
-                print(format_agent_result(result, classifier))
+                print(format_agent_result(result, classifier, task=task))
             except Exception as e:
                 print(f"\n[Execution error: {e}]\n")
 
@@ -372,6 +485,14 @@ def run_repl(
 def main() -> None:
     """CLI entry point."""
     args = parse_args()
+    task = build_task_specification(
+        task_id=args.task_id,
+        description=args.task_desc,
+        expected_tools=_parse_tool_list(args.expected_tools),
+        allowed_tools=_parse_tool_list(args.allowed_tools),
+        max_expected_steps=args.max_expected_steps,
+        allow_chaining=args.allow_chaining,
+    )
     try:
         agent, classifier, mock_server = setup_agent(
             model_name=args.model,
@@ -383,7 +504,13 @@ def main() -> None:
         print(f"Failed to initialize KAS agent: {e}", file=sys.stderr)
         sys.exit(1)
 
-    run_repl(agent, classifier, session_id=args.session_id, mock_server=mock_server)
+    run_repl(
+        agent,
+        classifier,
+        session_id=args.session_id,
+        mock_server=mock_server,
+        task=task,
+    )
 
 
 if __name__ == "__main__":
