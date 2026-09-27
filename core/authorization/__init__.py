@@ -4,6 +4,8 @@ from core.authorization.policy import (
     AuthorizationDecision,
     AuthorizationPolicy,
     DefaultToolAuthorizationPolicy,
+    ScopeAuthorizationPolicy,
+    ToolScopeConstraint,
 )
 
 __all__ = [
@@ -11,5 +13,8 @@ __all__ = [
     "AuthorizationPolicy",
     "AllowlistAuthorizationPolicy",
     "DefaultToolAuthorizationPolicy",
+    "ScopeAuthorizationPolicy",
+    "ToolScopeConstraint",
     "AuthorizationDeniedError",
 ]
+

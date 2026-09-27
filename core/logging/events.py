@@ -33,6 +33,7 @@ class Event:
     error: Optional[str] = None
     security_event: Optional[str] = None
     duration_seconds: Optional[float] = None
+    step_number: Optional[int] = None
 
     def to_dict(self, include_none: bool = True) -> Dict[str, Any]:
         """
