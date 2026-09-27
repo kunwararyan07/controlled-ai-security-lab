@@ -20,7 +20,11 @@ if REPO_ROOT not in sys.path:
 
 from agents.tool_agent.agent import ToolUsingAgent, create_full_tool_registry
 from agents.tool_agent.result import AgentResult
-from core.authorization.policy import AllowlistAuthorizationPolicy
+from core.authorization.policy import (
+    AllowlistAuthorizationPolicy,
+    ScopeAuthorizationPolicy,
+    ToolScopeConstraint,
+)
 from core.interfaces.tool_registry import ToolRegistry
 from core.logging.collector import EventCollector
 from core.models.base import ModelAdapter
@@ -76,11 +80,28 @@ def build_task_specification(
     max_expected_steps: Optional[int] = None,
     allow_chaining: Optional[bool] = None,
     tools_required: Optional[bool] = None,
+    db_allowed_tables: Optional[Iterable[str]] = None,
+    db_disallowed_tables: Optional[Iterable[str]] = None,
+    db_allowed_columns: Optional[Iterable[str]] = None,
+    db_require_where: Optional[bool] = None,
+    db_required_where_columns: Optional[Iterable[str]] = None,
+    db_disallow_wildcard: Optional[bool] = None,
+    db_max_rows: Optional[int] = None,
 ) -> Optional[TaskSpecification]:
     """
     Build a TaskSpecification if any research task parameters are specified.
     Returns None if no task constraints were configured.
     """
+    db_has_constraints = (
+        db_allowed_tables is not None
+        or db_disallowed_tables is not None
+        or db_allowed_columns is not None
+        or bool(db_require_where)
+        or db_required_where_columns is not None
+        or bool(db_disallow_wildcard)
+        or db_max_rows is not None
+    )
+
     if (
         task_id is None
         and description is None
@@ -89,6 +110,7 @@ def build_task_specification(
         and max_expected_steps is None
         and allow_chaining is None
         and tools_required is None
+        and not db_has_constraints
     ):
         return None
 
@@ -96,7 +118,19 @@ def build_task_specification(
     all_set = set(allowed_tools) if allowed_tools is not None else (set(exp_set) if exp_set else None)
 
     if tools_required is None:
-        tools_required = bool(exp_set or (all_set and len(all_set) > 0))
+        tools_required = bool(exp_set or (all_set and len(all_set) > 0) or db_has_constraints)
+
+    scope_constraints: Dict[str, ToolScopeConstraint] = {}
+    if db_has_constraints:
+        scope_constraints["database_tool"] = ToolScopeConstraint(
+            allowed_tables=_parse_tool_list(list(db_allowed_tables)) if db_allowed_tables is not None else None,
+            disallowed_tables=_parse_tool_list(list(db_disallowed_tables)) if db_disallowed_tables is not None else None,
+            allowed_columns=_parse_tool_list(list(db_allowed_columns)) if db_allowed_columns is not None else None,
+            allow_wildcard_columns=not bool(db_disallow_wildcard),
+            require_where_clause=bool(db_require_where),
+            required_where_columns=_parse_tool_list(list(db_required_where_columns)) if db_required_where_columns is not None else None,
+            max_rows=db_max_rows,
+        )
 
     return TaskSpecification(
         task_id=task_id or "",
@@ -104,6 +138,7 @@ def build_task_specification(
         tools_required=tools_required,
         expected_tools=exp_set,
         allowed_tools=all_set,
+        scope_constraints=scope_constraints,
         max_expected_steps=max_expected_steps if max_expected_steps is not None else 1,
         allow_chaining=bool(allow_chaining) if allow_chaining is not None else False,
     )
@@ -294,6 +329,7 @@ def setup_agent(
     max_steps: int = 3,
     workspace_root: Optional[str] = None,
     options: Optional[Dict[str, Any]] = None,
+    task_specification: Optional[TaskSpecification] = None,
 ) -> Tuple[ToolUsingAgent, SecurityClassifier, Optional[MockAPIServer]]:
     """
     Initialize and return ToolUsingAgent, SecurityClassifier, and optional MockAPIServer.
@@ -331,9 +367,19 @@ def setup_agent(
     registry.register(notification_tool)
     registry.register(command_tool)
 
-    # Authorization policy
+    # Authorization policy: use ScopeAuthorizationPolicy when database scope constraints are configured
     tools_to_allow = allowed_tools or list(DEFAULT_ALLOWED_TOOLS)
-    policy = AllowlistAuthorizationPolicy(allowed_tools=tools_to_allow)
+    if (
+        task_specification is not None
+        and task_specification.scope_constraints
+        and "database_tool" in task_specification.scope_constraints
+    ):
+        policy = ScopeAuthorizationPolicy(
+            allowed_tools=tools_to_allow,
+            tool_constraints=task_specification.scope_constraints,
+        )
+    else:
+        policy = AllowlistAuthorizationPolicy(allowed_tools=tools_to_allow)
 
     # Observability and classification
     collector = EventCollector()
@@ -432,6 +478,49 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         dest="allow_chaining",
         help="Disallow multi-tool chaining for this task",
     )
+    # Database query scope arguments
+    parser.add_argument(
+        "--db-allowed-tables",
+        nargs="*",
+        default=None,
+        help="Database tables permitted for queries (space- or comma-separated)",
+    )
+    parser.add_argument(
+        "--db-disallowed-tables",
+        nargs="*",
+        default=None,
+        help="Database tables forbidden for queries (space- or comma-separated)",
+    )
+    parser.add_argument(
+        "--db-allowed-columns",
+        nargs="*",
+        default=None,
+        help="Columns permitted in database query projections (space- or comma-separated)",
+    )
+    parser.add_argument(
+        "--db-require-where",
+        action="store_true",
+        default=False,
+        help="Require a WHERE clause in database queries",
+    )
+    parser.add_argument(
+        "--db-required-where-columns",
+        nargs="*",
+        default=None,
+        help="Columns that must be filtered in database query WHERE clauses",
+    )
+    parser.add_argument(
+        "--db-disallow-wildcard",
+        action="store_true",
+        default=False,
+        help="Disallow wildcard 'SELECT *' queries",
+    )
+    parser.add_argument(
+        "--db-max-rows",
+        type=int,
+        default=None,
+        help="Maximum rows allowed to be returned from a database query",
+    )
     return parser.parse_args(args)
 
 
@@ -492,6 +581,13 @@ def main() -> None:
         allowed_tools=_parse_tool_list(args.allowed_tools),
         max_expected_steps=args.max_expected_steps,
         allow_chaining=args.allow_chaining,
+        db_allowed_tables=_parse_tool_list(args.db_allowed_tables),
+        db_disallowed_tables=_parse_tool_list(args.db_disallowed_tables),
+        db_allowed_columns=_parse_tool_list(args.db_allowed_columns),
+        db_require_where=args.db_require_where,
+        db_required_where_columns=_parse_tool_list(args.db_required_where_columns),
+        db_disallow_wildcard=args.db_disallow_wildcard,
+        db_max_rows=args.db_max_rows,
     )
     try:
         agent, classifier, mock_server = setup_agent(
@@ -499,6 +595,7 @@ def main() -> None:
             base_url=args.endpoint,
             timeout=args.timeout,
             max_steps=args.max_steps,
+            task_specification=task,
         )
     except Exception as e:
         print(f"Failed to initialize KAS agent: {e}", file=sys.stderr)

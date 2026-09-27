@@ -143,7 +143,22 @@ class ToolScopeConstraint:
     disallowed_recipients: Optional[Set[str]] = None
     allowed_tables: Optional[Set[str]] = None
     disallowed_tables: Optional[Set[str]] = None
+    allowed_columns: Optional[Set[str]] = None
+    allow_wildcard_columns: bool = True
+    require_where_clause: bool = False
+    required_where_columns: Optional[Set[str]] = None
+    max_rows: Optional[int] = None
     custom_validator: Optional[Callable[[Dict[str, Any], Optional[Dict[str, Any]]], Tuple[bool, str]]] = None
+
+    def __post_init__(self) -> None:
+        if self.allowed_tables is not None and not isinstance(self.allowed_tables, set):
+            self.allowed_tables = set(self.allowed_tables)
+        if self.disallowed_tables is not None and not isinstance(self.disallowed_tables, set):
+            self.disallowed_tables = set(self.disallowed_tables)
+        if self.allowed_columns is not None and not isinstance(self.allowed_columns, set):
+            self.allowed_columns = set(self.allowed_columns)
+        if self.required_where_columns is not None and not isinstance(self.required_where_columns, set):
+            self.required_where_columns = set(self.required_where_columns)
 
     def evaluate(
         self,
@@ -230,13 +245,83 @@ class ToolScopeConstraint:
             if self.disallowed_recipients is not None and rec_norm in {r.lower() for r in self.disallowed_recipients}:
                 return False, f"Recipient '{recipient}' is explicitly disallowed by scope policy."
 
-        # 6. Database table constraints (database_tool)
+        # 6. Database table and query constraints (database_tool)
         query = args.get("query")
         if query is not None and isinstance(query, str):
+            # Check explicitly disallowed tables across entire query
             if self.disallowed_tables is not None:
                 for dt in self.disallowed_tables:
                     if re.search(rf"\b{re.escape(dt)}\b", query, re.IGNORECASE):
                         return False, f"Query references disallowed table '{dt}'."
+
+            # Normalize query by stripping comments and string literals
+            clean_q = re.sub(r"--.*$", "", query, flags=re.MULTILINE)
+            clean_q = re.sub(r"/\*.*?\*/", "", clean_q, flags=re.DOTALL)
+            clean_no_str = re.sub(r"'(''|[^'])*'", "''", clean_q)
+            clean_no_str = re.sub(r'"(""|[^"])*"', '""', clean_no_str)
+            clean_stmt = clean_no_str.strip().rstrip(";").strip()
+
+            if re.match(r"^SELECT\b", clean_stmt, re.IGNORECASE):
+                from_match = re.search(r"\bFROM\b", clean_stmt, re.IGNORECASE)
+                if from_match:
+                    projections_part = clean_stmt[len("SELECT"):from_match.start()].strip()
+                    rest = clean_stmt[from_match.end():].strip()
+
+                    where_match = re.search(r"\bWHERE\b", rest, re.IGNORECASE)
+                    if where_match:
+                        table_part = rest[:where_match.start()].strip()
+                        after_where = rest[where_match.end():].strip()
+                        stop_match = re.search(r"\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b", after_where, re.IGNORECASE)
+                        where_clause = after_where[:stop_match.start()].strip() if stop_match else after_where
+                    else:
+                        where_clause = None
+                        stop_match = re.search(r"\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b", rest, re.IGNORECASE)
+                        table_part = rest[:stop_match.start()].strip() if stop_match else rest
+
+                    # Table whitelist validation
+                    if self.allowed_tables is not None:
+                        norm_allowed_tables = {t.lower() for t in self.allowed_tables}
+                        raw_tables = [t.strip() for t in table_part.split(",") if t.strip()]
+                        for raw_t in raw_tables:
+                            tbl_name = raw_t.split()[0].strip("`\"'[]").lower()
+                            if tbl_name and tbl_name not in norm_allowed_tables:
+                                return False, f"Table '{tbl_name}' is not in allowed tables: {sorted(list(self.allowed_tables))}."
+
+                    # Wildcard 'SELECT *' validation
+                    has_wildcard = bool(re.search(r"(^|[\s,])\*([\s,]|$)", projections_part))
+                    if not self.allow_wildcard_columns:
+                        if has_wildcard:
+                            return False, "Wildcard 'SELECT *' is disallowed; explicit columns must be specified."
+                    elif self.allowed_columns is not None and "*" not in self.allowed_columns:
+                        if has_wildcard:
+                            return False, "Wildcard 'SELECT *' is disallowed when explicit allowed_columns are specified."
+
+                    # Allowed columns validation
+                    if self.allowed_columns is not None and "*" not in self.allowed_columns:
+                        norm_allowed_cols = {c.lower() for c in self.allowed_columns}
+                        raw_cols = [c.strip() for c in projections_part.split(",") if c.strip()]
+                        for raw_col in raw_cols:
+                            col_ident = raw_col.split()[0].strip()
+                            if "." in col_ident:
+                                col_ident = col_ident.split(".")[-1]
+                            col_clean = col_ident.strip("`\"'[]").lower()
+                            if col_clean and col_clean not in norm_allowed_cols:
+                                return False, f"Column '{col_ident}' is not in allowed columns: {sorted(list(self.allowed_columns))}."
+
+                    # Required WHERE clause validation
+                    if self.require_where_clause:
+                        if not where_clause or not where_clause.strip():
+                            return False, "Query requires a WHERE clause for targeted retrieval, but none was provided."
+                        if re.match(r"^\s*1\s*=\s*1\s*$", where_clause) or re.match(r"^\s*1\s*$", where_clause):
+                            return False, "Query WHERE clause cannot be a trivial tautology."
+
+                    # Required WHERE columns validation
+                    if self.required_where_columns is not None:
+                        if not where_clause or not where_clause.strip():
+                            return False, f"WHERE clause must filter on required column(s): {sorted(list(self.required_where_columns))}."
+                        for req_col in self.required_where_columns:
+                            if not re.search(rf"\b{re.escape(req_col)}\b\s*(=|LIKE\b|IN\b|<|>|<=|>=|!=|IS\b)", where_clause, re.IGNORECASE):
+                                return False, f"WHERE clause must filter on required column '{req_col}'."
 
         # 7. Custom validator
         if self.custom_validator is not None:
@@ -304,6 +389,11 @@ class ScopeAuthorizationPolicy(AllowlistAuthorizationPolicy):
         disallowed_recipients: Optional[Iterable[str]] = None,
         allowed_tables: Optional[Iterable[str]] = None,
         disallowed_tables: Optional[Iterable[str]] = None,
+        allowed_columns: Optional[Iterable[str]] = None,
+        allow_wildcard_columns: bool = True,
+        require_where_clause: bool = False,
+        required_where_columns: Optional[Iterable[str]] = None,
+        max_rows: Optional[int] = None,
         custom_validator: Optional[Callable[[Dict[str, Any], Optional[Dict[str, Any]]], Tuple[bool, str]]] = None,
     ) -> None:
         """Convenience method to register a tool and configure its scope constraints."""
@@ -323,6 +413,11 @@ class ScopeAuthorizationPolicy(AllowlistAuthorizationPolicy):
             disallowed_recipients=set(disallowed_recipients) if disallowed_recipients is not None else None,
             allowed_tables=set(allowed_tables) if allowed_tables is not None else None,
             disallowed_tables=set(disallowed_tables) if disallowed_tables is not None else None,
+            allowed_columns=set(allowed_columns) if allowed_columns is not None else None,
+            allow_wildcard_columns=allow_wildcard_columns,
+            require_where_clause=require_where_clause,
+            required_where_columns=set(required_where_columns) if required_where_columns is not None else None,
+            max_rows=max_rows,
             custom_validator=custom_validator,
         )
         self.set_constraint(tool_name, constraint)
