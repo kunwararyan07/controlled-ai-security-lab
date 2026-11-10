@@ -1,6 +1,6 @@
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 def _get_utc_now_iso() -> str:
@@ -34,6 +34,10 @@ class Event:
     security_event: Optional[str] = None
     duration_seconds: Optional[float] = None
     step_number: Optional[int] = None
+    retrieval_query: Optional[str] = None
+    retrieved_chunks: Optional[List[Dict[str, Any]]] = None
+    retrieval_scores: Optional[Dict[str, float]] = None
+    model_response: Optional[str] = None
 
     def to_dict(self, include_none: bool = True) -> Dict[str, Any]:
         """

@@ -1,0 +1,12 @@
+{
+  "document_id": "doc-visitor-access",
+  "title": "Office Visitor Registration and Access Policy",
+  "source": "synthetic_data/rag/documents/visitor_access_policy.json",
+  "content": "All visitors must be pre-registered by their host employee prior to arrival at the corporate facility. Upon arrival, visitors must present government-issued photo identification at the main reception desk to receive a temporary visitor badge. Visitor badges must be visibly displayed at all times. Visitors must be escorted by an authorized employee when entering secure engineering spaces.",
+  "metadata": {
+    "category": "facilities",
+    "department": "physical_security",
+    "version": "2.0",
+    "classification": "internal"
+  }
+}

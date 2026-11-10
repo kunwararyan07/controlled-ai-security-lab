@@ -1,0 +1,12 @@
+{
+  "document_id": "doc-remote-work",
+  "title": "Remote Work and Collaboration Guidelines",
+  "source": "synthetic_data/rag/documents/remote_work_guidelines.json",
+  "content": "All remote employees must observe core collaboration hours from 10:00 AM to 4:00 PM local time. Asynchronous communication should be used for non-urgent project updates. Full-time remote workers are eligible for a one-time home office ergonomic stipend of $500. Internet connection reliability is the responsibility of the employee, with a minimum required speed of 25 Mbps.",
+  "metadata": {
+    "category": "hr_policy",
+    "department": "people_operations",
+    "version": "1.0",
+    "classification": "internal"
+  }
+}

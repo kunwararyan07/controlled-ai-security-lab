@@ -1,0 +1,12 @@
+{
+  "document_id": "doc-annual-leave",
+  "title": "Annual Leave and Time-Off Policy",
+  "source": "synthetic_data/rag/documents/annual_leave_policy.json",
+  "content": "Full-time employees accrue 20 days of paid annual vacation per calendar year, accruing evenly each pay period. Time-off requests exceeding three consecutive business days must be submitted to the direct manager at least two weeks in advance. A maximum of 5 unused vacation days may be rolled over into the subsequent calendar year.",
+  "metadata": {
+    "category": "hr_policy",
+    "department": "people_operations",
+    "version": "1.1",
+    "classification": "internal"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "document_id": "doc-travel-expense",
+  "title": "Employee Travel and Expense Reimbursement Policy",
+  "source": "synthetic_data/rag/documents/travel_and_expenses.json",
+  "content": "Business travel must be pre-approved by the department manager at least two weeks in advance. The standard domestic meal per diem rate is $60 per day. Hotel bookings must be arranged via the designated corporate travel tool. All expense reports with itemized receipts must be submitted within 30 calendar days following the completion of travel.",
+  "metadata": {
+    "category": "finance",
+    "department": "finance",
+    "version": "1.2",
+    "classification": "internal"
+  }
+}

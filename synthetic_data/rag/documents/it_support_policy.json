@@ -1,0 +1,12 @@
+{
+  "document_id": "doc-it-support",
+  "title": "IT Support and Hardware Replacement Policy",
+  "source": "synthetic_data/rag/documents/it_support_policy.json",
+  "content": "Employees may request standard peripheral equipment including monitors, keyboards, and mice through the internal hardware portal. Hardware replacement requests are processed within two business days. Laptop refreshes occur every three years according to the corporate asset lifecycle schedule. In the event of damaged equipment, employees must file an incident ticket before a replacement unit is issued.",
+  "metadata": {
+    "category": "it_support",
+    "department": "infrastructure",
+    "version": "1.0",
+    "classification": "internal"
+  }
+}
