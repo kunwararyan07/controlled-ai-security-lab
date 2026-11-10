@@ -27,3 +27,6 @@ Thumbs.db
 # Test artifacts
 .pytest_cache/
 .coverage
+
+# Security lab experiments
+experiments/rag/results/
