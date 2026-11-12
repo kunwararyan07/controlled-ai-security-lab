@@ -30,3 +30,4 @@ Thumbs.db
 
 # Security lab experiments
 experiments/rag/results/
+experiments/rag/manual_results/
