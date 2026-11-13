@@ -8,6 +8,7 @@ from core.rag.corpus import (
 from core.rag.document import Chunk, Document, RetrievedChunk
 from core.rag.prompt import RAGPromptBuilder
 from core.rag.retriever import LocalRetriever
+from core.rag.validator import RAGSecurityValidator, SecurityValidationResult
 
 __all__ = [
     "Chunk",
@@ -15,7 +16,9 @@ __all__ = [
     "Document",
     "LocalRetriever",
     "RAGPromptBuilder",
+    "RAGSecurityValidator",
     "RetrievedChunk",
+    "SecurityValidationResult",
     "TextChunker",
     "get_default_corpus_dir",
     "load_document_from_file",

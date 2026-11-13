@@ -33,6 +33,11 @@ class RAGAgentResult:
         return self.user_query
 
     @property
+    def raw_response(self) -> Optional[str]:
+        """Alias for model_response."""
+        return self.model_response
+
+    @property
     def chunk_count(self) -> int:
         """Return the number of retrieved chunks."""
         return len(self.retrieved_chunks)
@@ -49,6 +54,7 @@ class RAGAgentResult:
             "user_input": self.user_input,
             "retrieved_chunks": [c.to_dict() for c in self.retrieved_chunks],
             "model_response": self.model_response,
+            "raw_response": self.raw_response,
             "final_response": self.final_response,
             "error": self.error,
             "session_id": self.session_id,

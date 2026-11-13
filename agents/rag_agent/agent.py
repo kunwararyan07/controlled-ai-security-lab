@@ -8,6 +8,7 @@ from core.logging.events import Event
 from core.models.base import ModelAdapter
 from core.rag.prompt import RAGPromptBuilder
 from core.rag.retriever import LocalRetriever
+from core.rag.validator import RAGSecurityValidator
 
 
 class RAGAgent:
@@ -20,6 +21,7 @@ class RAGAgent:
     Security Semantics:
     Retrieved documents are treated strictly as UNTRUSTED DATA and are demarcated
     in the prompt's context block, completely separated from trusted system instructions.
+    Response-level validation enforces the RAG-01 security rule against indirect injection.
     """
 
     def __init__(
@@ -30,6 +32,8 @@ class RAGAgent:
         prompt_builder: Optional[RAGPromptBuilder] = None,
         system_prompt_version: Optional[str] = "rag-v1",
         top_k: Optional[int] = None,
+        validator: Optional[RAGSecurityValidator] = None,
+        enable_response_validation: bool = True,
     ) -> None:
         """
         Initialize the RAGAgent.
@@ -41,6 +45,8 @@ class RAGAgent:
             prompt_builder: Optional RAGPromptBuilder for structuring prompts.
             system_prompt_version: Version identifier for prompt tracking.
             top_k: Optional default top_k override for retrieval.
+            validator: Optional RAGSecurityValidator for response-level validation.
+            enable_response_validation: Whether to run response-level validation (default True).
         """
         self.model = model
         self.retriever = retriever
@@ -48,6 +54,8 @@ class RAGAgent:
         self.prompt_builder = prompt_builder or RAGPromptBuilder()
         self.system_prompt_version = system_prompt_version
         self.top_k = top_k
+        self.validator = validator or RAGSecurityValidator()
+        self.enable_response_validation = enable_response_validation
         self._state: str = "idle"
         self._is_running: bool = True
 
@@ -83,6 +91,7 @@ class RAGAgent:
             "top_k": self.top_k or self.retriever.top_k,
             "has_event_collector": self.event_collector is not None,
             "system_prompt_version": self.system_prompt_version,
+            "enable_response_validation": self.enable_response_validation,
         }
 
     def get_logs(self, session_id: Optional[str] = None) -> List[Event]:
@@ -237,8 +246,30 @@ class RAGAgent:
 
         duration = round(time.monotonic() - start_time, 4)
 
-        # 4. Final response and completion event
-        final_response = raw_response
+        # 4. Response-level validation and layered defense
+        validation_result = None
+        if self.enable_response_validation and self.validator is not None:
+            validation_result = self.validator.validate(
+                query=user_query,
+                retrieved_chunks=retrieved_chunks,
+                raw_response=raw_response,
+            )
+
+        if validation_result and validation_result.is_compromised:
+            final_response = validation_result.sanitized_response
+            self._emit_event(
+                session_id=sid,
+                event_type="security_alert",
+                security_event="indirect_injection_mitigated",
+                user_input=user_query,
+                model_response=raw_response,
+                final_response=final_response,
+                agent_state="threat_mitigated",
+            )
+        else:
+            final_response = raw_response
+
+        # 5. Final response and completion event
         self._emit_event(
             session_id=sid,
             event_type="rag_result",
